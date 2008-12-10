@@ -133,7 +133,7 @@ open System.Linq.Expressions
 
 
 type JoinType = Inner | LeftOuter
-type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal
+type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual
     /// An atomic expression that usually represents a physical table.
     /// table name * alias hint.
 type internal LogicalTable = LogicalTable of Expression * string * string
@@ -293,7 +293,8 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             let binop = 
                 match binexp.NodeType with 
                 | ExpressionType.Add -> Add | ExpressionType.Subtract -> Subtract | ExpressionType.GreaterThan -> GreaterThan | ExpressionType.GreaterThanOrEqual -> GreaterThanOrEqual 
-                | ExpressionType.AndAlso -> AndAlso | ExpressionType.OrElse -> OrElse | ExpressionType.LessThan -> LessThan | ExpressionType.LessThanOrEqual -> LessThanOrEqual | ExpressionType.Equal -> Equal
+                | ExpressionType.AndAlso -> AndAlso | ExpressionType.OrElse -> OrElse | ExpressionType.LessThan -> LessThan | ExpressionType.LessThanOrEqual -> LessThanOrEqual 
+                | ExpressionType.Equal -> Equal | ExpressionType.NotEqual -> NotEqual
                 | _ -> failwith ("Bad binop: " ^ binexp.NodeType.ToString())
             BinarySqlValue(binop, processExpressionImpl(binexp.Left, tables, tableAliasHint, colPropMap), processExpressionImpl(binexp.Right, tables, tableAliasHint, colPropMap))
         | :? UnaryExpression as unary when unary.Method = null && unary.IsLiftedToNull -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap)
@@ -382,6 +383,7 @@ type SimpleMap<'key, 'value> (items : ('key * 'value) list) =
 
 let rec internal FindBindVariablesInSqlValue (v : SqlValue) (binds : SimpleMap<obj, string>) : SqlValue * SimpleMap<obj, string> =
     match v with
+    | ConstSqlValue(c, _) when (box c) = null -> v, binds
     | ConstSqlValue(c, nameSuggestion) ->
         let name = 
             if binds.ContainsKey(c) then binds.[c] 
@@ -473,14 +475,18 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
         let sqlstring = if c.GetType() = typeof<string> then "'" ^ c.ToString().Replace("'", "''") ^ "'" else c.ToString()
         sqlstring, tablenames
     | BindVariable(name) -> ":" ^ name, tablenames
-    | BinarySqlValue(op, v1, v2) ->
-        let opname = 
-            match op with 
-                | Add -> "+" | Subtract -> "-" | GreaterThan -> ">" | GreaterThanOrEqual -> ">=" | AndAlso -> "AND" | OrElse -> "OR" 
-                | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "="
-        let sqlLeft, t2 = SqlValueToString(v1, tablenames, settings)
-        let sqlRight, t3 = SqlValueToString(v2, t2, settings)
-        (sqlLeft ^ " " ^ opname ^ " " ^ sqlRight), t3
+    | BinarySqlValue(op, vLeft, vRight) ->
+        let sqlLeft, t2 = SqlValueToString(vLeft, tablenames, settings)
+        match op, vRight with
+        | Equal, ConstSqlValue(objRight, _) when objRight = null -> sqlLeft ^ " IS NULL", t2
+        | NotEqual, ConstSqlValue(objRight, _) when objRight = null -> sqlLeft ^ " IS NOT NULL", t2
+        | _, _ -> 
+            let opname = 
+                match op with 
+                    | Add -> "+" | Subtract -> "-" | GreaterThan -> ">" | GreaterThanOrEqual -> ">=" | AndAlso -> "AND" | OrElse -> "OR" 
+                    | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>"
+            let sqlRight, t3 = SqlValueToString(vRight, t2, settings)
+            ("(" ^ sqlLeft ^ " " ^ opname ^ " " ^ sqlRight ^ ")"), t3
     | ColumnAccessSqlValue(table, colPropertyInfo) -> 
         let tableAlias, t2 = SqlValueToString(table, tablenames, settings)
         let columnSql = GetColumnSql(colPropertyInfo, tableAlias, false)
