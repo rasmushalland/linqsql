@@ -537,24 +537,34 @@ and internal SelectToString(select : SelectClause, tablenames : Map<Expression, 
                 partSql ^ directionWord
             let parts = select.OrderBy |> List.map partmapper |> List.to_seq |> String.concat ", "
             "\r\nORDER BY " ^ parts
-    let getClassColNames (expr : Expression) (tableAlias : string) =
-        let requireColumnAttribute = true
-        match expr with
-        | :? ConstantExpression as c when (typeof<IQueryable>).IsAssignableFrom(c.Type) ->
-            let propertyinfos = c.Value.GetType().GetGenericArguments().[0].GetProperties() |> Array.to_list
-            propertyinfos 
-                |> List.filter (fun pi -> not(requireColumnAttribute) || pi.IsDefined(typeof<ColumnAttribute>, false) ) 
-                |> List.map (fun pi -> GetColumnSql(pi, tableAlias, true))
-        | _ -> failwith ("Bad expr: " ^ expr.ToString())
-    let getColumnsSqlList sqlTableVal = 
+    let getClassColNames(expr : Expression, tableAlias : string) =
+        let getClassColNamesDefaultImpl() = 
+            let requireColumnAttribute = false
+            match expr with
+            | :? ConstantExpression as c when (typeof<IQueryable>).IsAssignableFrom(c.Type) ->
+                let propertyinfos = c.Value.GetType().GetGenericArguments().[0].GetProperties()
+                propertyinfos 
+                    |> Seq.filter (fun pi -> not(requireColumnAttribute) || pi.IsDefined(typeof<ColumnAttribute>, false) ) 
+                    |> Seq.map (fun pi -> GetColumnSql(pi, tableAlias, true))
+            | _ -> failwith ("Bad expr: " ^ expr.ToString())
+        let tableType = expr.Type.GetGenericArguments().[0]
+        match settings.GetColumnsForSelect(tableType, tableAlias, "") with
+        | None -> 
+            let colnames = getClassColNamesDefaultImpl()
+            colnames |> Seq.reduce (fun s1 s2 -> s1 ^ ", " ^ s2)
+        | Some(s) -> s
+    let getColumnsSql sqlTableVal = 
         match sqlTableVal with
-        | VirtualTableSqlValue(map) -> map |> Seq.map (fun kvp -> SqlValueToString(kvp.Value, tableNamesAfterWhere, settings)) |> Seq.map fst |> Seq.to_list
-        | LogicalTableSqlValue(LogicalTable(expr, tableName, tableAlias)) -> getClassColNames expr tableAlias
+        | VirtualTableSqlValue(map) -> 
+            map |> Seq.map (fun kvp -> SqlValueToString(kvp.Value, tableNamesAfterWhere, settings)) 
+                |> Seq.map fst
+                |> Seq.reduce (fun s1 s2 -> s1 ^ ", " ^ s2)
+        | LogicalTableSqlValue(LogicalTable(expr, tableName, tableAlias)) -> getClassColNames(expr, tableAlias)
         | _ -> failwith ("notsup: " ^ sqlTableVal.GetType().ToString())
-    let columnsSql = getColumnsSqlList (select.VirtualTableSqlValue) |> List.reduce_left (fun s1 s2 -> s1 ^ ", " ^ s2)
+    let columnsSql = getColumnsSql (select.VirtualTableSqlValue)
     match settings.SelectStyle with
     | ColumnList -> "SELECT " ^ columnsSql ^ "\r\nFROM " ^ fromsql ^ wheresql ^ orderbysql, tableNamesAfterWhere
     | OnlyFrom -> fromsql ^ wheresql ^ orderbysql, tableNamesAfterWhere
-    
+
 
 

@@ -28,10 +28,21 @@ type LinqProvider =
     private new(sqlArg, bindsArg) =
         { sql = sqlArg; binds = bindsArg }
 
-    static member CreateSelect(expr : Expression) : LinqProvider =
+    static member CreateSelect(expr : Expression, helper : LinqApplicationHelper) : LinqProvider =
         let tmpSelectClause = Some(LinqModule.ProcessExpression expr)
         let sel, tmpBinds = LinqModule.FindBindVariablesInSelectClause tmpSelectClause.Value (LinqModule.SimpleMap.Empty())
-        let sql, _ = LinqModule.SelectToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), LinqModule.SelectStyle.ColumnList)
+        let sql, _ = 
+            let settings : LinqModule.SqlSettings = 
+                let helper = match box helper with | null -> new LinqApplicationHelper() | _  -> helper
+                let getcolsforselect(tableType, tableAlias, columnNamePrefix) =
+                    match helper.GetColumnsForSelect(tableType, tableAlias, columnNamePrefix) with
+                    | null -> None
+                    | s -> Some(s)
+                { 
+                    GetColumnsForSelect = getcolsforselect;
+                    SelectStyle = LinqModule.SelectStyle.ColumnList; 
+                }
+            LinqModule.SelectToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
         let binds = new Dictionary<string, obj>()
         for kvp in tmpBinds do
             binds.Add(kvp.Value, kvp.Key)
