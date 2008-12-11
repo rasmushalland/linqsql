@@ -8,83 +8,84 @@ open System.Linq.Expressions
 
 type internal SortDirection = Ascending | Descending
 
+module internal LinqPatterns =
 
-let internal (|Call|_|) (expr : Expression) =
-    match expr with
-    | :? MethodCallExpression as call -> Some(call.Method.Name, call)
-    | _ -> None
-
-let internal (|LambdaExpr|_|) (expr : Expression) =
-    match expr with
-    | Call(_, call) -> Some(call)
-    | _ -> None
-
-let internal (|LambdaFromUnary|_|) (expr : Expression) =
-    match expr with
-    | :? UnaryExpression as unary ->
-        match unary.Operand with
-        | :? LambdaExpression as lambda -> Some(lambda)
+    let internal (|Call|_|) (expr : Expression) =
+        match expr with
+        | :? MethodCallExpression as call -> Some(call.Method.Name, call)
         | _ -> None
-    | _ -> None
 
-let internal getlambdafromunary (expr : Expression) =
-    match expr with
-    | LambdaFromUnary(lambda) -> lambda
-    | _ -> failwith "Cannot get lambda."
-
-let internal (|Select|_|) (expr : Expression) =
-    match expr with
-    | Call("Select", call) -> 
-        match call.Arguments.[1] with 
-        | LambdaFromUnary(lambda) -> Some(call.Arguments.[0], lambda)
+    let internal (|LambdaExpr|_|) (expr : Expression) =
+        match expr with
+        | Call(_, call) -> Some(call)
         | _ -> None
-    | _ -> None
 
-let internal (|Where|_|) (expr : Expression) =
-    match expr with
-    | Call("Where", call) -> 
-        match call.Arguments.[1] with 
-        | LambdaFromUnary(lambda) -> Some(call.Arguments.[0], lambda) 
+    let internal (|LambdaFromUnary|_|) (expr : Expression) =
+        match expr with
+        | :? UnaryExpression as unary ->
+            match unary.Operand with
+            | :? LambdaExpression as lambda -> Some(lambda)
+            | _ -> None
         | _ -> None
-    | _ -> None
 
-let internal (|SelectMany|_|) (expr : Expression) =
-    match expr with
-    | Call("SelectMany", call) ->
-        let input = call.Arguments.[0]
-        let collSelector = getlambdafromunary(call.Arguments.[1])
-        let resultSelector = getlambdafromunary(call.Arguments.[2])
-        let resultSelector2 = if call.Arguments.Count = 3 then Some(getlambdafromunary(call.Arguments.[2])) else None
-        Some(input, collSelector, resultSelector2)
-    | _ -> None
+    let internal getlambdafromunary (expr : Expression) =
+        match expr with
+        | LambdaFromUnary(lambda) -> lambda
+        | _ -> failwith "Cannot get lambda."
 
-let internal (|EqualityJoin|_|) (expr : Expression) =
-    match expr with
-    | Call("Join", call) ->
-        let inputLeft = call.Arguments.[0]
-        let inputRight = call.Arguments.[1]
-        let leftSelector = getlambdafromunary(call.Arguments.[2])
-        let rightSelector = getlambdafromunary(call.Arguments.[3])
-        let resultSelector = getlambdafromunary(call.Arguments.[4])
-        Some(inputLeft, inputRight, leftSelector, rightSelector, resultSelector)
-    | _ -> None
-    
-let internal (|OrderBy|_|) (expr : Expression) =
-    match expr with
-    | Call(methodname, call) when 
-            methodname = "OrderBy" or methodname = "OrderByDescending" or
-            methodname = "ThenBy" or methodname = "ThenByDescending" 
-        ->
-        let input = call.Arguments.[0]
-        let keySelector = getlambdafromunary(call.Arguments.[1])
-        let dir = if methodname.EndsWith("Descending") then Descending else Ascending
-        Some(input, keySelector, dir)
-    | _ -> None
+    let internal (|Select|_|) (expr : Expression) =
+        match expr with
+        | Call("Select", call) -> 
+            match call.Arguments.[1] with 
+            | LambdaFromUnary(lambda) -> Some(call.Arguments.[0], lambda)
+            | _ -> None
+        | _ -> None
 
-let internal (|DefaultIfEmpty|_|) (expr : Expression) =
-    match expr with
-    | Call("DefaultIfEmpty", call) -> Some(call.Arguments.[0])
-    | _ -> None
+    let internal (|Where|_|) (expr : Expression) =
+        match expr with
+        | Call("Where", call) -> 
+            match call.Arguments.[1] with 
+            | LambdaFromUnary(lambda) -> Some(call.Arguments.[0], lambda) 
+            | _ -> None
+        | _ -> None
+
+    let internal (|SelectMany|_|) (expr : Expression) =
+        match expr with
+        | Call("SelectMany", call) ->
+            let input = call.Arguments.[0]
+            let collSelector = getlambdafromunary(call.Arguments.[1])
+            let resultSelector = getlambdafromunary(call.Arguments.[2])
+            let resultSelector2 = if call.Arguments.Count = 3 then Some(getlambdafromunary(call.Arguments.[2])) else None
+            Some(input, collSelector, resultSelector2)
+        | _ -> None
+
+    let internal (|Join|_|) (expr : Expression) =
+        match expr with
+        | Call("Join", call) ->
+            let inputLeft = call.Arguments.[0]
+            let inputRight = call.Arguments.[1]
+            let leftSelector = getlambdafromunary(call.Arguments.[2])
+            let rightSelector = getlambdafromunary(call.Arguments.[3])
+            let resultSelector = getlambdafromunary(call.Arguments.[4])
+            Some(inputLeft, inputRight, leftSelector, rightSelector, resultSelector)
+        | _ -> None
+        
+    let internal (|OrderBy|_|) (expr : Expression) =
+        match expr with
+        | Call(methodname, call) when 
+                methodname = "OrderBy" or methodname = "OrderByDescending" or
+                methodname = "ThenBy" or methodname = "ThenByDescending" 
+            ->
+            let input = call.Arguments.[0]
+            let keySelector = getlambdafromunary(call.Arguments.[1])
+            let dir = if methodname.EndsWith("Descending") then Descending else Ascending
+            Some(input, keySelector, dir)
+        | _ -> None
+
+    let internal (|DefaultIfEmpty|_|) (expr : Expression) =
+        match expr with
+        | Call("DefaultIfEmpty", call) -> Some(call.Arguments.[0])
+        | _ -> None
 
 
 // TODO:
@@ -254,14 +255,14 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) pairs
             VirtualTableSqlValue(m2)
 
-        | Call(_, _) ->
+        | LinqPatterns.Call(_, _) ->
             match expr with
-            | Select(input, selector) ->
+            | LinqPatterns.Select(input, selector) ->
                 let inputAliasHint = Some(selector.Parameters.[0].Name)
                 let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
                 let lambdatable = processExpressionImpl(selector.Body, tables.Add(selector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
                 SelectClauseSqlValue({ inputselectclause with VirtualTableSqlValue = lambdatable })
-            | Where(input, predicate) ->
+            | LinqPatterns.Where(input, predicate) ->
                 let inputAliasHint = Some(predicate.Parameters.[0].Name)
                 let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
                 let predicateScalar = processExpressionImpl(predicate.Body, tables.Add(predicate.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
@@ -270,18 +271,18 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                     | Some(where) -> BinarySqlValue(AndAlso, where, predicateScalar)
                     | None -> predicateScalar
                 SelectClauseSqlValue({ inputselectclause with WhereClause = Some(newwhere); VirtualTableSqlValue = inputselectclause.VirtualTableSqlValue })
-            | OrderBy(input, keySelector, direction) -> 
+            | LinqPatterns.OrderBy(input, keySelector, direction) -> 
                 let inputAliasHint = Some(keySelector.Parameters.[0].Name)
                 let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
                 let keyScalar = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
                 SelectClauseSqlValue({ inputselectclause with OrderBy = (keyScalar, direction) :: inputselectclause.OrderBy })
-            | SelectMany(input, collSelector, resultSelector) ->
+            | LinqPatterns.SelectMany(input, collSelector, resultSelector) ->
                 let newhint = Some(collSelector.Parameters.[0].Name)
                 let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap)
 
                 let jointype, collExpr =
                     match collSelector.Body with
-                    | DefaultIfEmpty(collExpr) -> JoinType.LeftOuter, collExpr
+                    | LinqPatterns.DefaultIfEmpty(collExpr) -> JoinType.LeftOuter, collExpr
                     | collExpr -> JoinType.Inner, collExpr
                 let collSelectClause = 
                     let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
@@ -302,7 +303,7 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
 
                 SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
 
-            | EqualityJoin(leftInput, rightInput, leftSelector, rightSelector, resultSelector) ->
+            | LinqPatterns.Join(leftInput, rightInput, leftSelector, rightSelector, resultSelector) ->
                 let leftSelectClause = 
                     let leftHint = Some(leftSelector.Parameters.[0].Name)
                     processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap)
@@ -331,7 +332,7 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
 
                 SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
 
-            | Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
+            | LinqPatterns.Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
                 let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap))
                 let argPairs = Seq.zip (callExpr.Method.GetParameters()) argSqlValues
                 let queryable =
