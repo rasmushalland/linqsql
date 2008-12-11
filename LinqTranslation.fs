@@ -213,80 +213,6 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             SelectClauseSqlValue(
                 { FromClause = [{ Table = TableFrom(t); JoinType = None; Condition = None }]; 
                   WhereClause = None; VirtualTableSqlValue = LogicalTableSqlValue t; OrderBy = [] })
-        | Select(input, selector) ->
-            let inputAliasHint = Some(selector.Parameters.[0].Name)
-            let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
-            let lambdatable = processExpressionImpl(selector.Body, tables.Add(selector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
-            SelectClauseSqlValue({ inputselectclause with VirtualTableSqlValue = lambdatable })
-        | Where(input, predicate) ->
-            let inputAliasHint = Some(predicate.Parameters.[0].Name)
-            let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
-            let predicateScalar = processExpressionImpl(predicate.Body, tables.Add(predicate.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
-            let newwhere =
-                match inputselectclause.WhereClause with
-                | Some(where) -> BinarySqlValue(AndAlso, where, predicateScalar)
-                | None -> predicateScalar
-            SelectClauseSqlValue({ inputselectclause with WhereClause = Some(newwhere); VirtualTableSqlValue = inputselectclause.VirtualTableSqlValue })
-        | OrderBy(input, keySelector, direction) -> 
-            let inputAliasHint = Some(keySelector.Parameters.[0].Name)
-            let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
-            let keyScalar = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
-            SelectClauseSqlValue({ inputselectclause with OrderBy = (keyScalar, direction) :: inputselectclause.OrderBy })
-        | SelectMany(input, collSelector, resultSelector) ->
-            let newhint = Some(collSelector.Parameters.[0].Name)
-            let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap)
-
-            let jointype, collExpr =
-                match collSelector.Body with
-                | DefaultIfEmpty(collExpr) -> JoinType.LeftOuter, collExpr
-                | collExpr -> JoinType.Inner, collExpr
-            let collSelectClause = 
-                let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
-                processExpressionImplAsSelect(collExpr, tablesForJoin, None, colPropMap)
-
-            let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None)
-
-            let tAfterSelect = match resultSelector with 
-                                | Some(sel) -> 
-                                    let joinedToTable =
-                                        let lastFromClause = List.hd collSelectClause.FromClause
-                                        match lastFromClause.Table with
-                                        | TableFrom(logicalTable) -> logicalTable
-                                        | SelectClauseFrom(_) -> failwith "Can't have joined to a select clause."
-                                    let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
-                                    processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap)
-                                | None -> inputselectclause.VirtualTableSqlValue
-
-            SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
-
-        | EqualityJoin(leftInput, rightInput, leftSelector, rightSelector, resultSelector) ->
-            let leftSelectClause = 
-                let leftHint = Some(leftSelector.Parameters.[0].Name)
-                processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap)
-            
-            let rightSelectClause = 
-                let rightHint = Some(rightSelector.Parameters.[0].Name)
-                processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap)
-
-            let condition =
-                let getOrderedJoinValues vt (keySelector : LambdaExpression) =
-                    let expr = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], vt), Some(keySelector.Parameters.[0].Name), colPropMap)
-                    match expr with
-                    | VirtualTableSqlValue(colmap) -> colmap |> Seq.map (fun kvp -> kvp.Value) |> Seq.to_list
-                    | _ -> [expr]
-                let leftCols = getOrderedJoinValues leftSelectClause.VirtualTableSqlValue leftSelector
-                let rightCols = getOrderedJoinValues rightSelectClause.VirtualTableSqlValue rightSelector
-                List.map2 (fun leftSqlValue rightSqlValue -> BinarySqlValue(BinaryOperator.Equal, leftSqlValue, rightSqlValue)) leftCols rightCols
-                |> List.reduce_left (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
-
-            let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition))
-
-            // Is this correct?: To keep only the vtable from the result selector? Should we keep more?
-            let resultVirtualTable = 
-                let resultTableMap = tables.Add(resultSelector.Parameters.[0], leftSelectClause.VirtualTableSqlValue).Add(resultSelector.Parameters.[1], rightSelectClause.VirtualTableSqlValue)
-                processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap)
-
-            SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
 
         | :? ParameterExpression as p -> tables.[p]
         | :? BinaryExpression as binexp ->
@@ -327,30 +253,109 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             let foldFunc (statemap : Map<MethodInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap))
             let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) pairs
             VirtualTableSqlValue(m2)
-        | Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
-            let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap))
-            let argPairs = Seq.zip (callExpr.Method.GetParameters()) argSqlValues
-            let queryable =
-                let makeArgument (param : ParameterInfo, sqlValue) : obj =
-                    match sqlValue with
-                    | ConstSqlValue(v, _) -> v
-                    | _ when param.ParameterType.IsValueType -> System.Activator.CreateInstance(param.ParameterType)
-                    | _ -> box None
-                let argsArray = argPairs |> Seq.map makeArgument |> Seq.to_array
-                callExpr.Method.Invoke(None, argsArray) :?> IQueryable
-            let newColPropMap =
-                let makeColPairs (param : ParameterInfo, sqlValue) : (string * SqlValue) option = 
-                    match sqlValue with
-                    | ConstSqlValue(_, _) -> None
-                    | ColumnAccessSqlValue(_, _) -> Some(param.Name, sqlValue)
-                    | _ -> failwith ("Can only parameterize views with constants and column properties.")
-                let emptyColPropMap = Map<string, SqlValue>.Empty(System.StringComparer.Ordinal)
-                Seq.choose makeColPairs argPairs 
-                |> Seq.fold (fun (colPropMap2 : Map<string, SqlValue>) (propname, sqlValue) -> colPropMap2.Add(propname, sqlValue)) emptyColPropMap
 
-            let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap)
+        | Call(_, _) ->
+            match expr with
+            | Select(input, selector) ->
+                let inputAliasHint = Some(selector.Parameters.[0].Name)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
+                let lambdatable = processExpressionImpl(selector.Body, tables.Add(selector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
+                SelectClauseSqlValue({ inputselectclause with VirtualTableSqlValue = lambdatable })
+            | Where(input, predicate) ->
+                let inputAliasHint = Some(predicate.Parameters.[0].Name)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
+                let predicateScalar = processExpressionImpl(predicate.Body, tables.Add(predicate.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
+                let newwhere =
+                    match inputselectclause.WhereClause with
+                    | Some(where) -> BinarySqlValue(AndAlso, where, predicateScalar)
+                    | None -> predicateScalar
+                SelectClauseSqlValue({ inputselectclause with WhereClause = Some(newwhere); VirtualTableSqlValue = inputselectclause.VirtualTableSqlValue })
+            | OrderBy(input, keySelector, direction) -> 
+                let inputAliasHint = Some(keySelector.Parameters.[0].Name)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
+                let keyScalar = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
+                SelectClauseSqlValue({ inputselectclause with OrderBy = (keyScalar, direction) :: inputselectclause.OrderBy })
+            | SelectMany(input, collSelector, resultSelector) ->
+                let newhint = Some(collSelector.Parameters.[0].Name)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap)
 
-            SelectClauseSqlValue select
+                let jointype, collExpr =
+                    match collSelector.Body with
+                    | DefaultIfEmpty(collExpr) -> JoinType.LeftOuter, collExpr
+                    | collExpr -> JoinType.Inner, collExpr
+                let collSelectClause = 
+                    let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
+                    processExpressionImplAsSelect(collExpr, tablesForJoin, None, colPropMap)
+
+                let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None)
+
+                let tAfterSelect = match resultSelector with 
+                                    | Some(sel) -> 
+                                        let joinedToTable =
+                                            let lastFromClause = List.hd collSelectClause.FromClause
+                                            match lastFromClause.Table with
+                                            | TableFrom(logicalTable) -> logicalTable
+                                            | SelectClauseFrom(_) -> failwith "Can't have joined to a select clause."
+                                        let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
+                                        processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap)
+                                    | None -> inputselectclause.VirtualTableSqlValue
+
+                SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
+
+            | EqualityJoin(leftInput, rightInput, leftSelector, rightSelector, resultSelector) ->
+                let leftSelectClause = 
+                    let leftHint = Some(leftSelector.Parameters.[0].Name)
+                    processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap)
+                
+                let rightSelectClause = 
+                    let rightHint = Some(rightSelector.Parameters.[0].Name)
+                    processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap)
+
+                let condition =
+                    let getOrderedJoinValues vt (keySelector : LambdaExpression) =
+                        let expr = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], vt), Some(keySelector.Parameters.[0].Name), colPropMap)
+                        match expr with
+                        | VirtualTableSqlValue(colmap) -> colmap |> Seq.map (fun kvp -> kvp.Value) |> Seq.to_list
+                        | _ -> [expr]
+                    let leftCols = getOrderedJoinValues leftSelectClause.VirtualTableSqlValue leftSelector
+                    let rightCols = getOrderedJoinValues rightSelectClause.VirtualTableSqlValue rightSelector
+                    List.map2 (fun leftSqlValue rightSqlValue -> BinarySqlValue(BinaryOperator.Equal, leftSqlValue, rightSqlValue)) leftCols rightCols
+                    |> List.reduce_left (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
+
+                let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition))
+
+                // Is this correct?: To keep only the vtable from the result selector? Should we keep more?
+                let resultVirtualTable = 
+                    let resultTableMap = tables.Add(resultSelector.Parameters.[0], leftSelectClause.VirtualTableSqlValue).Add(resultSelector.Parameters.[1], rightSelectClause.VirtualTableSqlValue)
+                    processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap)
+
+                SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
+
+            | Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
+                let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap))
+                let argPairs = Seq.zip (callExpr.Method.GetParameters()) argSqlValues
+                let queryable =
+                    let makeArgument (param : ParameterInfo, sqlValue) : obj =
+                        match sqlValue with
+                        | ConstSqlValue(v, _) -> v
+                        | _ when param.ParameterType.IsValueType -> System.Activator.CreateInstance(param.ParameterType)
+                        | _ -> box None
+                    let argsArray = argPairs |> Seq.map makeArgument |> Seq.to_array
+                    callExpr.Method.Invoke(None, argsArray) :?> IQueryable
+                let newColPropMap =
+                    let makeColPairs (param : ParameterInfo, sqlValue) : (string * SqlValue) option = 
+                        match sqlValue with
+                        | ConstSqlValue(_, _) -> None
+                        | ColumnAccessSqlValue(_, _) -> Some(param.Name, sqlValue)
+                        | _ -> failwith ("Can only parameterize views with constants and column properties.")
+                    let emptyColPropMap = Map<string, SqlValue>.Empty(System.StringComparer.Ordinal)
+                    Seq.choose makeColPairs argPairs 
+                    |> Seq.fold (fun (colPropMap2 : Map<string, SqlValue>) (propname, sqlValue) -> colPropMap2.Add(propname, sqlValue)) emptyColPropMap
+
+                let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap)
+
+                SelectClauseSqlValue select
+            | _ -> failwith ("Unknown call: " ^ expr.ToString())
 
         | _ -> failwith ("argh12: " ^ expr.NodeType.ToString() ^ ": " ^ expr.ToString())
 
@@ -573,4 +578,17 @@ and internal SelectToString(select : SelectClause, tablenames : Map<Expression, 
     | OnlyFrom -> fromsql ^ wheresql ^ orderbysql, tableNamesAfterWhere
 
 
+let internal DeleteToString(select : SelectClause, tablenames : Map<Expression, string>, settings : SqlSettings) : string =
+    let getTableSql sqlTableVal = 
+        match sqlTableVal with
+        | LogicalTableSqlValue(LogicalTable(expr, tableName, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(expr, tableAlias)
+        | _ -> failwith ("notsup: " ^ sqlTableVal.GetType().ToString())
+    let tableSql, tableNamesAfterFrom = getTableSql (select.VirtualTableSqlValue)
+    let whereSql, tableNamesAfterWhere = 
+        match select.WhereClause with
+        | Some(where) -> 
+            let wheresql2, tablenames3_2 = SqlValueToString(where, tableNamesAfterFrom, settings)
+            "\r\nWHERE " ^ wheresql2, tablenames3_2
+        | None -> "", tablenames
+    "DELETE FROM " ^ tableSql ^ whereSql
 
