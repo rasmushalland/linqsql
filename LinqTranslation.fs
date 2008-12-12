@@ -93,8 +93,12 @@ module internal LinqPatterns =
 // - LINQ join syntax. v
 // - Respect ColumnAttribute and TableAttribute. v
 // - Parameterized views. v
-// - Generate DELETE and UPDATE.
-// - Some support for executing and retrieving records.
+// - Generate DELETE. v
+// - Generate UPDATE.
+// - Custom application handling of method calls, e.g. "String.ToUpper()" -> oracle "upper()".
+// - Some support for executing and retrieving records:
+//   - Let the application help. v
+//   - Automatic - figure out how to populate classes.
 // - Relations via properties. Implement as parameterized views or as SQL in ColumnAttribute?
 // - Nested queries.
 // - group by.
@@ -102,9 +106,9 @@ module internal LinqPatterns =
 // - "numlist2table".
 
 // Lectio:
-// - Use LectioDbAccess.
-// - Use OracleFields.
-// - Use RowReader.
+// - Use LectioDbAccess. v
+// - Use OracleFields. v
+// - Use RowReader. v
 
 
 
@@ -147,6 +151,7 @@ and internal SqlValue =
     | ConstSqlValue of obj * string option
     | BindVariable of string
     | BinarySqlValue of BinaryOperator * SqlValue * SqlValue
+    | CallSqlValue of string * SqlValue list
     | ColumnAccessSqlValue of SqlValue * PropertyInfo
     | SelectClauseSqlValue of SelectClause
 and internal JoinClause = { Table : FromItem; JoinType : JoinType option; Condition : SqlValue option }
@@ -356,7 +361,16 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                 let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap)
 
                 SelectClauseSqlValue select
-            | _ -> failwith ("Unknown call: " ^ expr.ToString())
+            | LinqPatterns.Call(methodName, callExpr) ->
+                let allSqlValues = 
+                    let argsSqlValues = callExpr.Arguments |> Seq.map (fun argExpr -> processExpressionImpl(argExpr, tables, None, colPropMap)) |> Seq.to_list
+                    match callExpr.Object with
+                    | null -> argsSqlValues
+                    | _ ->
+                        let instanceSqlValue = processExpressionImpl(callExpr.Object, tables, None, colPropMap)
+                        instanceSqlValue :: argsSqlValues
+                CallSqlValue(methodName, allSqlValues)
+            | _ -> failwith ("Unknown call??: " ^ expr.ToString())
 
         | _ -> failwith ("argh12: " ^ expr.NodeType.ToString() ^ ": " ^ expr.ToString())
 
@@ -387,7 +401,18 @@ type SimpleMap<'key, 'value> (items : ('key * 'value) list) =
 
 // Bind variables.
 
-let rec internal FindBindVariablesInSqlValue (v : SqlValue) (binds : SimpleMap<obj, string>) : SqlValue * SimpleMap<obj, string> =
+let mapWithAccumulator<'a, 'b, 'c>(f : ('a * 'c) -> ('b * 'c), initialState : 'c, s : 'a list ) : 'b list * 'c = 
+    let rec ff(itemlist, state) =
+        match itemlist with
+        | item :: itemTail -> 
+            let newTail, newState = ff(itemTail, state)
+            let newItem, newState2 = f(item, newState)
+            (newItem :: newTail), newState2
+        | [] -> [], state
+    ff(s, initialState)
+
+
+let rec internal FindBindVariablesInSqlValue (v : SqlValue, binds : SimpleMap<obj, string>) : SqlValue * SimpleMap<obj, string> =
     match v with
     | ConstSqlValue(c, _) when (box c) = null -> v, binds
     | ConstSqlValue(c, nameSuggestion) ->
@@ -397,12 +422,15 @@ let rec internal FindBindVariablesInSqlValue (v : SqlValue) (binds : SimpleMap<o
             else "p" ^ binds.Count.ToString()
         BindVariable(name), binds.Add(c, name)
     | BindVariable(_) -> v, binds
+    | CallSqlValue(functionName, argsSqlValues) ->
+        let newArgs, newBinds = mapWithAccumulator((fun (arg, binds) -> FindBindVariablesInSqlValue(arg, binds)), binds, argsSqlValues)
+        CallSqlValue(functionName, newArgs), newBinds
     | BinarySqlValue(op, l, r) ->
-        let l2, b1 = FindBindVariablesInSqlValue l binds
-        let r2, b2 = FindBindVariablesInSqlValue r b1
+        let l2, b1 = FindBindVariablesInSqlValue(l, binds)
+        let r2, b2 = FindBindVariablesInSqlValue(r, b1)
         BinarySqlValue(op, l2, r2), b2
     | ColumnAccessSqlValue(sv, colname) -> 
-        let sv2, b2 = FindBindVariablesInSqlValue sv binds
+        let sv2, b2 = FindBindVariablesInSqlValue(sv, binds)
         ColumnAccessSqlValue(sv2, colname), b2
     | LogicalTableSqlValue(_) -> v, binds
     | VirtualTableSqlValue(_) -> failwith "virtual table??"
@@ -422,7 +450,7 @@ and internal FindBindVariablesInFromClause (from : JoinClause list) (binds : Sim
         let newcondition, b4 =
             match join.Condition with
             | Some(condition) ->
-                let newcondTmp, b4Tmp = FindBindVariablesInSqlValue condition b3
+                let newcondTmp, b4Tmp = FindBindVariablesInSqlValue(condition, b3)
                 Some(newcondTmp), b4Tmp
             | None -> None, b3
         { join with Table = newjoin; Condition = newcondition } :: newtail, b4
@@ -431,14 +459,14 @@ and internal FindBindVariablesInSelectClause (select : SelectClause) (binds : Si
     let newfrom, bindsAfterFrom = FindBindVariablesInFromClause select.FromClause binds
     let (newwhere : SqlValue option), bindsAfterWhere = 
         if select.WhereClause.IsSome then 
-            let newwhere, bindsAfterWhere = FindBindVariablesInSqlValue select.WhereClause.Value bindsAfterFrom
+            let newwhere, bindsAfterWhere = FindBindVariablesInSqlValue(select.WhereClause.Value, bindsAfterFrom)
             Some(newwhere), bindsAfterWhere
         else None, bindsAfterFrom
     let neworderby, bindsAfterOrderby =
         let rec searchInOrderByPairs orderbypairs binds =
             match orderbypairs with
             | (sv, dir) :: tail ->
-                let sv2, b2 = FindBindVariablesInSqlValue sv binds
+                let sv2, b2 = FindBindVariablesInSqlValue(sv, binds)
                 let newtail, b3 = searchInOrderByPairs tail b2
                 (sv2, dir) :: newtail, b3
             | [] -> [], binds
@@ -471,9 +499,6 @@ let internal GetColumnSql(columnPropertyInfo : PropertyInfo, tableAlias : string
     else tableAlias ^ "." ^ columnPropertyInfo.Name
 
 
-
-
-
 let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, string>, settings : SqlSettings) : string * Map<Expression, string> =
     match v with
     | ConstSqlValue(c, _) -> 
@@ -493,6 +518,9 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
                     | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>"
             let sqlRight, t3 = SqlValueToString(vRight, t2, settings)
             ("(" ^ sqlLeft ^ " " ^ opname ^ " " ^ sqlRight ^ ")"), t3
+    | CallSqlValue(functionName, argsSqlValues) ->
+        let (argsSql : string list), t2 = mapWithAccumulator((fun (arg, state) -> SqlValueToString(arg, state, settings)), tablenames, argsSqlValues)
+        functionName ^ "(" ^ (String.concat ", " argsSql) ^ ")", t2
     | ColumnAccessSqlValue(table, colPropertyInfo) -> 
         let tableAlias, t2 = SqlValueToString(table, tablenames, settings)
         let columnSql = GetColumnSql(colPropertyInfo, tableAlias, false)
