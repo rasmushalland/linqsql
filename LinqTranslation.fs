@@ -95,7 +95,7 @@ module internal LinqPatterns =
 // - Parameterized views. v
 // - Generate DELETE. v
 // - Generate UPDATE.
-// - Custom application handling of method calls, e.g. "String.ToUpper()" -> oracle "upper()".
+// - Custom application handling of method calls, e.g. "String.ToUpper()" -> oracle "upper()". v
 // - Some support for executing and retrieving records:
 //   - Let the application help. v
 //   - Automatic - figure out how to populate classes.
@@ -138,7 +138,7 @@ open System.Linq.Expressions
 
 
 type JoinType = Inner | LeftOuter
-type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | Other
+type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | StringConcat | Other
     /// An atomic expression that usually represents a physical table.
     /// table name * alias hint.
 type internal LogicalTable = LogicalTable of Expression * string * string
@@ -230,7 +230,8 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
         | :? BinaryExpression as binexp ->
             let binop = 
                 match binexp.NodeType with 
-                | ExpressionType.Add -> Add | ExpressionType.Subtract -> Subtract | ExpressionType.GreaterThan -> GreaterThan | ExpressionType.GreaterThanOrEqual -> GreaterThanOrEqual 
+                | ExpressionType.Add -> if binexp.Type = typeof<System.String> then StringConcat else Add 
+                | ExpressionType.Subtract -> Subtract | ExpressionType.GreaterThan -> GreaterThan | ExpressionType.GreaterThanOrEqual -> GreaterThanOrEqual 
                 | ExpressionType.AndAlso -> AndAlso | ExpressionType.OrElse -> OrElse | ExpressionType.LessThan -> LessThan | ExpressionType.LessThanOrEqual -> LessThanOrEqual 
                 | ExpressionType.Equal -> Equal | ExpressionType.NotEqual -> NotEqual | ExpressionType.Coalesce -> Other
                 | _ -> failwith ("Bad binop: " ^ binexp.NodeType.ToString())
@@ -527,7 +528,7 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
             let opname = 
                 match op with 
                     | Add -> "+" | Subtract -> "-" | GreaterThan -> ">" | GreaterThanOrEqual -> ">=" | AndAlso -> "AND" | OrElse -> "OR" 
-                    | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>"
+                    | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>" | StringConcat -> "||"
                     | Other -> failwith "Binary \"Other\" should not make it to this place."
             let sqlRight, t3 = SqlValueToString(vRight, t2, settings)
             ("(" ^ sqlLeft ^ " " ^ opname ^ " " ^ sqlRight ^ ")"), t3
