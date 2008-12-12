@@ -168,6 +168,12 @@ and internal SelectClause = {
 type internal SelectStyle = ColumnList | OnlyFrom
 
 
+type internal SqlSettings = {
+    GetColumnsForSelect :  System.Type * string * string  -> string option;
+    TranslateCall : MethodCallExpression -> string option
+    SelectStyle : SelectStyle;
+}
+
 
 let internal (|TableAccess|_|) (aliasHint : string option) (expr : Expression) : LogicalTable option =
     let GetTableName(tabletype : System.Type) : string =
@@ -186,14 +192,14 @@ let internal (|TableAccess|_|) (aliasHint : string option) (expr : Expression) :
     | _ -> None
 
 
-let internal ProcessExpression (expr : Expression) : SelectClause =
-    let rec processExpressionImplAsSelect (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>) : SelectClause =
-        let selValue = processExpressionImpl(expr, tables, tableAliasHint, colPropMap)
+let internal ProcessExpression (expr : Expression, settings : SqlSettings) : SelectClause =
+    let rec processExpressionImplAsSelect (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>, settings : SqlSettings) : SelectClause =
+        let selValue = processExpressionImpl(expr, tables, tableAliasHint, colPropMap, settings)
         match selValue with
         | SelectClauseSqlValue(sel) -> sel
         | _ -> failwith ("not sel, but " ^ (any_to_string selValue)  ^ "??")
 
-    and mergeSelect (owner : SelectClause, toBeMerged : SelectClause, joinType : JoinType option, joinCondition : SqlValue option) : SelectClause =
+    and mergeSelect (owner : SelectClause, toBeMerged : SelectClause, joinType : JoinType option, joinCondition : SqlValue option, settings : SqlSettings) : SelectClause =
         match 1 with
         | _ when List.is_empty toBeMerged.OrderBy = false -> failwith "Can't have ORDER BY on sub-select."
         | _ ->
@@ -213,7 +219,7 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             let newFromItem = { Table = newFromItem; JoinType = joinType; Condition = condition }
             { owner with FromClause = newFromItem :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
 
-    and processExpressionImpl (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>) : SqlValue =
+    and processExpressionImpl (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>, settings : SqlSettings) : SqlValue =
         match expr with
         | TableAccess tableAliasHint t -> 
             SelectClauseSqlValue(
@@ -228,11 +234,11 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                 | ExpressionType.AndAlso -> AndAlso | ExpressionType.OrElse -> OrElse | ExpressionType.LessThan -> LessThan | ExpressionType.LessThanOrEqual -> LessThanOrEqual 
                 | ExpressionType.Equal -> Equal | ExpressionType.NotEqual -> NotEqual
                 | _ -> failwith ("Bad binop: " ^ binexp.NodeType.ToString())
-            BinarySqlValue(binop, processExpressionImpl(binexp.Left, tables, tableAliasHint, colPropMap), processExpressionImpl(binexp.Right, tables, tableAliasHint, colPropMap))
-        | :? UnaryExpression as unary when unary.Method = null && unary.IsLiftedToNull -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap)
+            BinarySqlValue(binop, processExpressionImpl(binexp.Left, tables, tableAliasHint, colPropMap, settings), processExpressionImpl(binexp.Right, tables, tableAliasHint, colPropMap, settings))
+        | :? UnaryExpression as unary when unary.Method = null && unary.IsLiftedToNull -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap, settings)
         | :? MemberExpression as ma ->
             let inputinstancevalue =
-                if (box ma.Expression) <> null then processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap)
+                if (box ma.Expression) <> null then processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings)
                 else ConstSqlValue(box None, None) // e.g. table properties and DateTime.Now.
             match inputinstancevalue with
             | VirtualTableSqlValue(vt) -> vt.[(ma.Member :?> System.Reflection.PropertyInfo).GetGetMethod()]
@@ -247,7 +253,7 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                     | :? PropertyInfo as pi -> pi.GetValue(instance, Array.empty), pi.Name, None // Table properties and DateTime.Now.
                     | _ -> failwith ("Member of const, but not field: " ^ instance.GetType().ToString())
                 match v, preCookedSqlValue with
-                | :? IQueryable as queryable, _ -> processExpressionImpl(queryable.Expression, tables, tableAliasHint, colPropMap)
+                | :? IQueryable as queryable, _ -> processExpressionImpl(queryable.Expression, tables, tableAliasHint, colPropMap, settings)
                 | _, Some(sqlValue) -> sqlValue
                 | _ -> ConstSqlValue(v, Some(name))
             | v -> failwith ("Member access on non-virtual table or const: " ^ v.ToString() ^ " - Member:" ^ ma.Member.Name)
@@ -256,7 +262,7 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
         // Lambda
         | :? NewExpression as newExpr ->
             let pairs = List.zip (newExpr.Members |> Seq.map (fun memberinfo -> memberinfo :?> System.Reflection.MethodInfo) |> Seq.to_list) (newExpr.Arguments |> Seq.to_list)
-            let foldFunc (statemap : Map<MethodInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap))
+            let foldFunc (statemap : Map<MethodInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
             let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) pairs
             VirtualTableSqlValue(m2)
 
@@ -264,13 +270,13 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             match expr with
             | LinqPatterns.Select(input, selector) ->
                 let inputAliasHint = Some(selector.Parameters.[0].Name)
-                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
-                let lambdatable = processExpressionImpl(selector.Body, tables.Add(selector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap, settings)
+                let lambdatable = processExpressionImpl(selector.Body, tables.Add(selector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap, settings)
                 SelectClauseSqlValue({ inputselectclause with VirtualTableSqlValue = lambdatable })
             | LinqPatterns.Where(input, predicate) ->
                 let inputAliasHint = Some(predicate.Parameters.[0].Name)
-                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
-                let predicateScalar = processExpressionImpl(predicate.Body, tables.Add(predicate.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap, settings)
+                let predicateScalar = processExpressionImpl(predicate.Body, tables.Add(predicate.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap, settings)
                 let newwhere =
                     match inputselectclause.WhereClause with
                     | Some(where) -> BinarySqlValue(AndAlso, where, predicateScalar)
@@ -278,12 +284,12 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                 SelectClauseSqlValue({ inputselectclause with WhereClause = Some(newwhere); VirtualTableSqlValue = inputselectclause.VirtualTableSqlValue })
             | LinqPatterns.OrderBy(input, keySelector, direction) -> 
                 let inputAliasHint = Some(keySelector.Parameters.[0].Name)
-                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap)
-                let keyScalar = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap, settings)
+                let keyScalar = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap, settings)
                 SelectClauseSqlValue({ inputselectclause with OrderBy = (keyScalar, direction) :: inputselectclause.OrderBy })
             | LinqPatterns.SelectMany(input, collSelector, resultSelector) ->
                 let newhint = Some(collSelector.Parameters.[0].Name)
-                let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap)
+                let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap, settings)
 
                 let jointype, collExpr =
                     match collSelector.Body with
@@ -291,9 +297,9 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                     | collExpr -> JoinType.Inner, collExpr
                 let collSelectClause = 
                     let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
-                    processExpressionImplAsSelect(collExpr, tablesForJoin, None, colPropMap)
+                    processExpressionImplAsSelect(collExpr, tablesForJoin, None, colPropMap, settings)
 
-                let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None)
+                let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None, settings)
 
                 let tAfterSelect = match resultSelector with 
                                     | Some(sel) -> 
@@ -303,7 +309,7 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                                             | TableFrom(logicalTable) -> logicalTable
                                             | SelectClauseFrom(_) -> failwith "Can't have joined to a select clause."
                                         let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
-                                        processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap)
+                                        processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap, settings)
                                     | None -> inputselectclause.VirtualTableSqlValue
 
                 SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
@@ -311,15 +317,15 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
             | LinqPatterns.Join(leftInput, rightInput, leftSelector, rightSelector, resultSelector) ->
                 let leftSelectClause = 
                     let leftHint = Some(leftSelector.Parameters.[0].Name)
-                    processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap)
+                    processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap, settings)
                 
                 let rightSelectClause = 
                     let rightHint = Some(rightSelector.Parameters.[0].Name)
-                    processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap)
+                    processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap, settings)
 
                 let condition =
                     let getOrderedJoinValues vt (keySelector : LambdaExpression) =
-                        let expr = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], vt), Some(keySelector.Parameters.[0].Name), colPropMap)
+                        let expr = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], vt), Some(keySelector.Parameters.[0].Name), colPropMap, settings)
                         match expr with
                         | VirtualTableSqlValue(colmap) -> colmap |> Seq.map (fun kvp -> kvp.Value) |> Seq.to_list
                         | _ -> [expr]
@@ -328,17 +334,17 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                     List.map2 (fun leftSqlValue rightSqlValue -> BinarySqlValue(BinaryOperator.Equal, leftSqlValue, rightSqlValue)) leftCols rightCols
                     |> List.reduce_left (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
 
-                let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition))
+                let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition), settings)
 
                 // Is this correct?: To keep only the vtable from the result selector? Should we keep more?
                 let resultVirtualTable = 
                     let resultTableMap = tables.Add(resultSelector.Parameters.[0], leftSelectClause.VirtualTableSqlValue).Add(resultSelector.Parameters.[1], rightSelectClause.VirtualTableSqlValue)
-                    processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap)
+                    processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap, settings)
 
                 SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
 
             | LinqPatterns.Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
-                let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap))
+                let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap, settings))
                 let argPairs = Seq.zip (callExpr.Method.GetParameters()) argSqlValues
                 let queryable =
                     let makeArgument (param : ParameterInfo, sqlValue) : obj =
@@ -358,23 +364,24 @@ let internal ProcessExpression (expr : Expression) : SelectClause =
                     Seq.choose makeColPairs argPairs 
                     |> Seq.fold (fun (colPropMap2 : Map<string, SqlValue>) (propname, sqlValue) -> colPropMap2.Add(propname, sqlValue)) emptyColPropMap
 
-                let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap)
+                let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap, settings)
 
                 SelectClauseSqlValue select
             | LinqPatterns.Call(methodName, callExpr) ->
+                let methodName = match settings.TranslateCall(callExpr) with | Some(n) -> n | None -> methodName
                 let allSqlValues = 
-                    let argsSqlValues = callExpr.Arguments |> Seq.map (fun argExpr -> processExpressionImpl(argExpr, tables, None, colPropMap)) |> Seq.to_list
-                    match callExpr.Object with
-                    | null -> argsSqlValues
-                    | _ ->
-                        let instanceSqlValue = processExpressionImpl(callExpr.Object, tables, None, colPropMap)
+                    let argsSqlValues = callExpr.Arguments |> Seq.map (fun argExpr -> processExpressionImpl(argExpr, tables, None, colPropMap, settings)) |> Seq.to_list
+                    match callExpr.Method.IsStatic with
+                    | true -> argsSqlValues
+                    | false ->
+                        let instanceSqlValue = processExpressionImpl(callExpr.Object, tables, None, colPropMap, settings)
                         instanceSqlValue :: argsSqlValues
                 CallSqlValue(methodName, allSqlValues)
             | _ -> failwith ("Unknown call??: " ^ expr.ToString())
 
         | _ -> failwith ("argh12: " ^ expr.NodeType.ToString() ^ ": " ^ expr.ToString())
 
-    let s = processExpressionImpl(expr, Map<_,_>.Empty(ParameterExpressionComparer), None, Map<string, SqlValue>.Empty(System.StringComparer.Ordinal))
+    let s = processExpressionImpl(expr, Map<_,_>.Empty(ParameterExpressionComparer), None, Map<string, SqlValue>.Empty(System.StringComparer.Ordinal), settings)
     match s with
     | SelectClauseSqlValue(sel) -> sel
     | _ -> failwith "not select??"
@@ -479,11 +486,6 @@ and internal FindBindVariablesInSelectClause (select : SelectClause) (binds : Si
 let internal ObjComparer = new ComparisonComparer<obj>(defaultComparer)
 
 
-
-type internal SqlSettings = {
-    GetColumnsForSelect :  System.Type * string * string  -> string option;
-    SelectStyle : SelectStyle;
-}
 
 
 

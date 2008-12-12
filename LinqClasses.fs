@@ -19,17 +19,21 @@ type LinqApplicationHelper() =
     default this.GetColumnsForSelect(tabletype, tableAlias, columnNamePrefix) =
         null
 
+    abstract member TranslateCall : MethodCallExpression -> string
+    default this.TranslateCall(call) = null
+        
+
 module internal LLL =
     open LinqModule
 
     let internal createSettings(helper) : SqlSettings =
         let helper = match box helper with | null -> new LinqApplicationHelper() | _  -> helper
         let getcolsforselect(tableType, tableAlias, columnNamePrefix) =
-            match helper.GetColumnsForSelect(tableType, tableAlias, columnNamePrefix) with
-            | null -> None
-            | s -> Some(s)
-        { 
+            match helper.GetColumnsForSelect(tableType, tableAlias, columnNamePrefix) with | null -> None | s -> Some(s)
+        let translatecall callExpr = match helper.TranslateCall(callExpr) with | v when System.String.IsNullOrEmpty(v) -> None | c -> Some(c)
+        {
             GetColumnsForSelect = getcolsforselect;
+            TranslateCall = translatecall;
             SelectStyle = LinqModule.SelectStyle.ColumnList; 
         }
 
@@ -49,19 +53,17 @@ type LinqProvider =
         { sql = sqlArg; binds = binds }
 
     static member CreateSelect(expr : Expression, helper : LinqApplicationHelper) : LinqProvider =
-        let tmpSelectClause = Some(LinqModule.ProcessExpression expr)
+        let settings = LLL.createSettings helper
+        let tmpSelectClause = Some(LinqModule.ProcessExpression(expr, settings))
         let sel, tmpBinds = LinqModule.FindBindVariablesInSelectClause tmpSelectClause.Value (LinqModule.SimpleMap.Empty())
-        let sql, _ = 
-            let settings = LLL.createSettings helper
-            LinqModule.SelectToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
+        let sql, _ = LinqModule.SelectToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
         new LinqProvider(sql, LLL.makeBindsDict tmpBinds)
 
     static member CreateDelete(expr : Expression, helper : LinqApplicationHelper) : LinqProvider =
-        let tmpSelectClause = Some(LinqModule.ProcessExpression expr)
+        let settings = LLL.createSettings helper
+        let tmpSelectClause = Some(LinqModule.ProcessExpression(expr, settings))
         let sel, tmpBinds = LinqModule.FindBindVariablesInSelectClause tmpSelectClause.Value (LinqModule.SimpleMap.Empty())
-        let sql = 
-            let settings = LLL.createSettings helper
-            LinqModule.DeleteToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
+        let sql =  LinqModule.DeleteToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
         new LinqProvider(sql, LLL.makeBindsDict tmpBinds)
 
     member this.Sql : string = this.sql
