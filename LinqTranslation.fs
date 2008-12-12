@@ -151,6 +151,7 @@ and internal SqlValue =
     | ConstSqlValue of obj * string option
     | BindVariable of string
     | BinarySqlValue of BinaryOperator * SqlValue * SqlValue
+    | ConditionalSqlValue of SqlValue * SqlValue * SqlValue
     | CallSqlValue of string * SqlValue list
     | ColumnAccessSqlValue of SqlValue * PropertyInfo
     | SelectClauseSqlValue of SelectClause
@@ -269,13 +270,16 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 | _ -> ConstSqlValue(v, Some(name))
             | v -> failwith ("Member access on non-virtual table or const: " ^ v.ToString() ^ " - Member:" ^ ma.Member.Name)
         | :? ConstantExpression as ce -> ConstSqlValue(ce.Value, None)
-
-        // Lambda
         | :? NewExpression as newExpr ->
             let pairs = List.zip (newExpr.Members |> Seq.map (fun memberinfo -> memberinfo :?> System.Reflection.MethodInfo) |> Seq.to_list) (newExpr.Arguments |> Seq.to_list)
             let foldFunc (statemap : Map<MethodInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
             let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) pairs
             VirtualTableSqlValue(m2)
+        | :? ConditionalExpression as ce ->
+            let test = processExpressionImpl(ce.Test, tables, tableAliasHint, colPropMap, settings)
+            let ifTrue = processExpressionImpl(ce.IfTrue, tables, tableAliasHint, colPropMap, settings)
+            let ifFalse = processExpressionImpl(ce.IfFalse, tables, tableAliasHint, colPropMap, settings)
+            ConditionalSqlValue(test, ifTrue, ifFalse)
 
         | LinqPatterns.Call(_, _) ->
             match expr with
@@ -447,12 +451,17 @@ let rec internal FindBindVariablesInSqlValue (v : SqlValue, binds : SimpleMap<ob
         let l2, b1 = FindBindVariablesInSqlValue(l, binds)
         let r2, b2 = FindBindVariablesInSqlValue(r, b1)
         BinarySqlValue(op, l2, r2), b2
+    | ConditionalSqlValue(test, ifTrue, ifFalse) ->
+        let newTest, b2 = FindBindVariablesInSqlValue(test, binds)
+        let newIfTrue, b3 = FindBindVariablesInSqlValue(ifTrue, b2)
+        let newIfFalse, b4 = FindBindVariablesInSqlValue(ifFalse, b3)
+        ConditionalSqlValue(newTest, newIfTrue, newIfFalse), b4
     | ColumnAccessSqlValue(sv, colname) -> 
         let sv2, b2 = FindBindVariablesInSqlValue(sv, binds)
         ColumnAccessSqlValue(sv2, colname), b2
     | LogicalTableSqlValue(_) -> v, binds
     | VirtualTableSqlValue(_) -> failwith "virtual table??"
-    | SelectClauseSqlValue(_) -> raise <| new System.NotSupportedException("select clause")
+    | SelectClauseSqlValue(_) -> failwith "select clause??"
 
 and internal FindBindVariablesInFromClause (from : JoinClause list) (binds : SimpleMap<obj, string>) : JoinClause list * SimpleMap<obj, string> =
     match from with 
@@ -527,11 +536,16 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
         | _, _ -> 
             let opname = 
                 match op with 
-                    | Add -> "+" | Subtract -> "-" | GreaterThan -> ">" | GreaterThanOrEqual -> ">=" | AndAlso -> "AND" | OrElse -> "OR" 
-                    | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>" | StringConcat -> "||"
-                    | Other -> failwith "Binary \"Other\" should not make it to this place."
+                | Add -> "+" | Subtract -> "-" | GreaterThan -> ">" | GreaterThanOrEqual -> ">=" | AndAlso -> "AND" | OrElse -> "OR" 
+                | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>" | StringConcat -> "||"
+                | Other -> failwith "Binary \"Other\" should not make it to this place."
             let sqlRight, t3 = SqlValueToString(vRight, t2, settings)
             ("(" ^ sqlLeft ^ " " ^ opname ^ " " ^ sqlRight ^ ")"), t3
+    | ConditionalSqlValue(test, ifTrue, ifFalse) ->
+        let sqlTest, t2 = SqlValueToString(test, tablenames, settings)
+        let sqlIfTrue, t3 = SqlValueToString(ifTrue, t2, settings)
+        let sqlIfFalse, t4 = SqlValueToString(ifFalse, t3, settings)
+        "CASE WHEN " ^ sqlTest ^ " THEN " ^ sqlIfTrue ^ " ELSE " ^ sqlIfFalse ^ " END", t4
     | CallSqlValue(functionName, argsSqlValues) ->
         let (argsSql : string list), t2 = mapWithAccumulator((fun (arg, state) -> SqlValueToString(arg, state, settings)), tablenames, argsSqlValues)
         functionName ^ "(" ^ (String.concat ", " argsSql) ^ ")", t2
@@ -541,8 +555,7 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
         columnSql, t2
     | LogicalTableSqlValue(LogicalTable(tableExpression, tableName, tableAliasHint)) ->
         match tablenames.TryFind(tableExpression) with
-        | Some(name) -> 
-            name, tablenames
+        | Some(name) -> name, tablenames
         | None -> 
             let tableAlias =
                 let rec tryAlias i =
@@ -603,16 +616,14 @@ and internal SelectToString(select : SelectClause, tablenames : Map<Expression, 
             | _ -> failwith ("Bad expr: " ^ expr.ToString())
         let tableType = expr.Type.GetGenericArguments().[0]
         match settings.GetColumnsForSelect(tableType, tableAlias, "") with
-        | None -> 
-            let colnames = getClassColNamesDefaultImpl()
-            colnames |> Seq.reduce (fun s1 s2 -> s1 ^ ", " ^ s2)
+        | None -> getClassColNamesDefaultImpl() |> String.concat ", "
         | Some(s) -> s
     let getColumnsSql sqlTableVal = 
         match sqlTableVal with
         | VirtualTableSqlValue(map) -> 
             map |> Seq.map (fun kvp -> SqlValueToString(kvp.Value, tableNamesAfterWhere, settings)) 
                 |> Seq.map fst
-                |> Seq.reduce (fun s1 s2 -> s1 ^ ", " ^ s2)
+                |> String.concat ", "
         | LogicalTableSqlValue(LogicalTable(expr, tableName, tableAlias)) -> getClassColNames(expr, tableAlias)
         | _ -> failwith ("notsup: " ^ sqlTableVal.GetType().ToString())
     let columnsSql = getColumnsSql (select.VirtualTableSqlValue)
