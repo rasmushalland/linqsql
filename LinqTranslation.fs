@@ -138,7 +138,7 @@ open System.Linq.Expressions
 
 
 type JoinType = Inner | LeftOuter
-type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual
+type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | Other
     /// An atomic expression that usually represents a physical table.
     /// table name * alias hint.
 type internal LogicalTable = LogicalTable of Expression * string * string
@@ -232,9 +232,19 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 match binexp.NodeType with 
                 | ExpressionType.Add -> Add | ExpressionType.Subtract -> Subtract | ExpressionType.GreaterThan -> GreaterThan | ExpressionType.GreaterThanOrEqual -> GreaterThanOrEqual 
                 | ExpressionType.AndAlso -> AndAlso | ExpressionType.OrElse -> OrElse | ExpressionType.LessThan -> LessThan | ExpressionType.LessThanOrEqual -> LessThanOrEqual 
-                | ExpressionType.Equal -> Equal | ExpressionType.NotEqual -> NotEqual
+                | ExpressionType.Equal -> Equal | ExpressionType.NotEqual -> NotEqual | ExpressionType.Coalesce -> Other
                 | _ -> failwith ("Bad binop: " ^ binexp.NodeType.ToString())
-            BinarySqlValue(binop, processExpressionImpl(binexp.Left, tables, tableAliasHint, colPropMap, settings), processExpressionImpl(binexp.Right, tables, tableAliasHint, colPropMap, settings))
+            let newLeft = processExpressionImpl(binexp.Left, tables, tableAliasHint, colPropMap, settings)
+            let newRight = processExpressionImpl(binexp.Right, tables, tableAliasHint, colPropMap, settings)
+            match binop with
+            | Other ->
+                match binexp.NodeType with
+                | ExpressionType.Coalesce -> 
+                    match newRight with 
+                    | CallSqlValue("coalesce", rightArgs) -> CallSqlValue("coalesce", newLeft :: rightArgs)
+                    | _ -> CallSqlValue("coalesce", [newLeft; newRight])
+                | _ -> failwith <| sprintf "binary huh?: %s" (binexp.NodeType.ToString())
+            | _ -> BinarySqlValue(binop, newLeft, newRight)
         | :? UnaryExpression as unary when unary.Method = null && unary.IsLiftedToNull -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap, settings)
         | :? MemberExpression as ma ->
             let inputinstancevalue =
@@ -518,6 +528,7 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
                 match op with 
                     | Add -> "+" | Subtract -> "-" | GreaterThan -> ">" | GreaterThanOrEqual -> ">=" | AndAlso -> "AND" | OrElse -> "OR" 
                     | LessThan -> "<" | LessThanOrEqual -> "<=" | Equal -> "=" | NotEqual -> "<>"
+                    | Other -> failwith "Binary \"Other\" should not make it to this place."
             let sqlRight, t3 = SqlValueToString(vRight, t2, settings)
             ("(" ^ sqlLeft ^ " " ^ opname ^ " " ^ sqlRight ^ ")"), t3
     | CallSqlValue(functionName, argsSqlValues) ->
