@@ -139,6 +139,7 @@ open System.Linq.Expressions
 
 type JoinType = Inner | LeftOuter
 type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | StringConcat | Other
+type SqlConstruct = CaseWhen
     /// An atomic expression that usually represents a physical table.
     /// table name * alias hint.
 type internal LogicalTable = LogicalTable of Expression * string * string
@@ -151,7 +152,8 @@ and internal SqlValue =
     | ConstSqlValue of obj * string option
     | BindVariable of string
     | BinarySqlValue of BinaryOperator * SqlValue * SqlValue
-    | ConditionalSqlValue of SqlValue * SqlValue * SqlValue
+//    | ConditionalSqlValue of SqlValue * SqlValue * SqlValue
+    | SqlConstruct of SqlConstruct * SqlValue list
     | CallSqlValue of string * SqlValue list
     | ColumnAccessSqlValue of SqlValue * PropertyInfo
     | SelectClauseSqlValue of SelectClause
@@ -279,7 +281,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
             let test = processExpressionImpl(ce.Test, tables, tableAliasHint, colPropMap, settings)
             let ifTrue = processExpressionImpl(ce.IfTrue, tables, tableAliasHint, colPropMap, settings)
             let ifFalse = processExpressionImpl(ce.IfFalse, tables, tableAliasHint, colPropMap, settings)
-            ConditionalSqlValue(test, ifTrue, ifFalse)
+            SqlConstruct(CaseWhen, [test; ifTrue; ifFalse])
 
         | LinqPatterns.Call(_, _) ->
             match expr with
@@ -451,11 +453,9 @@ let rec internal FindBindVariablesInSqlValue (v : SqlValue, binds : SimpleMap<ob
         let l2, b1 = FindBindVariablesInSqlValue(l, binds)
         let r2, b2 = FindBindVariablesInSqlValue(r, b1)
         BinarySqlValue(op, l2, r2), b2
-    | ConditionalSqlValue(test, ifTrue, ifFalse) ->
-        let newTest, b2 = FindBindVariablesInSqlValue(test, binds)
-        let newIfTrue, b3 = FindBindVariablesInSqlValue(ifTrue, b2)
-        let newIfFalse, b4 = FindBindVariablesInSqlValue(ifFalse, b3)
-        ConditionalSqlValue(newTest, newIfTrue, newIfFalse), b4
+    | SqlConstruct(construct, argsSqlValues) ->
+        let newArgs, newBinds = mapWithAccumulator((fun (arg, binds) -> FindBindVariablesInSqlValue(arg, binds)), binds, argsSqlValues)
+        SqlConstruct(construct, newArgs), newBinds
     | ColumnAccessSqlValue(sv, colname) -> 
         let sv2, b2 = FindBindVariablesInSqlValue(sv, binds)
         ColumnAccessSqlValue(sv2, colname), b2
@@ -545,11 +545,14 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
                 | Other -> failwith "Binary \"Other\" should not make it to this place."
             let sqlRight, t3 = SqlValueToString(vRight, t2, settings)
             ("(" ^ sqlLeft ^ " " ^ opname ^ " " ^ sqlRight ^ ")"), t3
-    | ConditionalSqlValue(test, ifTrue, ifFalse) ->
-        let sqlTest, t2 = SqlValueToString(test, tablenames, settings)
-        let sqlIfTrue, t3 = SqlValueToString(ifTrue, t2, settings)
-        let sqlIfFalse, t4 = SqlValueToString(ifFalse, t3, settings)
-        "CASE WHEN " ^ sqlTest ^ " THEN " ^ sqlIfTrue ^ " ELSE " ^ sqlIfFalse ^ " END", t4
+    | SqlConstruct(construct, argsSqlValues) ->
+        match construct, argsSqlValues with
+        | CaseWhen, [test; ifTrue; ifFalse] ->
+            let sqlTest, t2 = SqlValueToString(test, tablenames, settings)
+            let sqlIfTrue, t3 = SqlValueToString(ifTrue, t2, settings)
+            let sqlIfFalse, t4 = SqlValueToString(ifFalse, t3, settings)
+            "CASE WHEN " ^ sqlTest ^ " THEN " ^ sqlIfTrue ^ " ELSE " ^ sqlIfFalse ^ " END", t4
+        | CaseWhen, _ -> failwith "CaseWhen ???"
     | CallSqlValue(functionName, argsSqlValues) ->
         let (argsSql : string list), t2 = mapWithAccumulator((fun (arg, state) -> SqlValueToString(arg, state, settings)), tablenames, argsSqlValues)
         functionName ^ "(" ^ (String.concat ", " argsSql) ^ ")", t2
