@@ -130,6 +130,16 @@ let internal ExpressionComparer = new ComparisonComparer<Expression>(defaultComp
 let internal ParameterExpressionComparer = new ComparisonComparer<ParameterExpression>(defaultComparer)
 let internal MethodInfoComparer = new ComparisonComparer<MethodInfo>(defaultComparer)
 
+let internal mapWithAccumulator<'a, 'b, 'c>(f : ('a * 'c) -> ('b * 'c), initialState : 'c, s : 'a list ) : 'b list * 'c = 
+    let rec ff(itemlist, state) =
+        match itemlist with
+        | item :: itemTail -> 
+            let newTail, newState = ff(itemTail, state)
+            let newItem, newState2 = f(item, newState)
+            (newItem :: newTail), newState2
+        | [] -> [], state
+    ff(s, initialState)
+
 
 
 
@@ -273,9 +283,19 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
             | v -> failwith ("Member access on non-virtual table or const: " ^ v.ToString() ^ " - Member:" ^ ma.Member.Name)
         | :? ConstantExpression as ce -> ConstSqlValue(ce.Value, None)
         | :? NewExpression as newExpr ->
+            let aa = newExpr.Members.First().DeclaringType
             let pairs = List.zip (newExpr.Members |> Seq.map (fun memberinfo -> memberinfo :?> System.Reflection.MethodInfo) |> Seq.to_list) (newExpr.Arguments |> Seq.to_list)
             let foldFunc (statemap : Map<MethodInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
             let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) pairs
+            VirtualTableSqlValue(m2)
+        | :? MemberInitExpression as mi ->
+            // Throw away the NewExpression - since there is a MemberInitExpression, the constructur call can reasonably be ignored.
+//            let newExprSqlValue = processExpressionImpl(mi, tables, tableAliasHint, colPropMap, settings)
+            let memberAssBindings = mi.Bindings |> Seq.map (fun binding -> binding :?> MemberAssignment) |> Seq.to_list
+            let foldFunc (statemap : Map<MethodInfo, SqlValue>) (ma : MemberAssignment) = 
+                let methodInfo = (ma.Member :?> PropertyInfo).GetGetMethod()
+                statemap.Add(methodInfo, processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings))
+            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) memberAssBindings
             VirtualTableSqlValue(m2)
         | :? ConditionalExpression as ce ->
             let test = processExpressionImpl(ce.Test, tables, tableAliasHint, colPropMap, settings)
@@ -424,16 +444,6 @@ type SimpleMap<'key, 'value> (items : ('key * 'value) list) =
         member this.GetEnumerator() = (this :> IEnumerable<_>).GetEnumerator() :> System.Collections.IEnumerator
 
 // Bind variables.
-
-let mapWithAccumulator<'a, 'b, 'c>(f : ('a * 'c) -> ('b * 'c), initialState : 'c, s : 'a list ) : 'b list * 'c = 
-    let rec ff(itemlist, state) =
-        match itemlist with
-        | item :: itemTail -> 
-            let newTail, newState = ff(itemTail, state)
-            let newItem, newState2 = f(item, newState)
-            (newItem :: newTail), newState2
-        | [] -> [], state
-    ff(s, initialState)
 
 
 let rec internal FindBindVariablesInSqlValue (v : SqlValue, binds : SimpleMap<obj, string>) : SqlValue * SimpleMap<obj, string> =
@@ -652,4 +662,26 @@ let internal DeleteToString(select : SelectClause, tablenames : Map<Expression, 
             "\r\nWHERE " ^ wheresql2, tablenames3_2
         | None -> "", tablenames
     "DELETE FROM " ^ tableSql ^ whereSql
+
+let internal UpdateToString(select : SelectClause, tablenames : Map<Expression, string>, settings : SqlSettings) : string =
+    let setSql, tableNamesAfterSet =
+        match select.VirtualTableSqlValue with
+        | LogicalTableSqlValue(LogicalTable(expr, tableName, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(expr, tableAlias)
+        | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
+        | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
+    let tableSql, tableNamesAfterUpdate =
+        match select.VirtualTableSqlValue with
+        | LogicalTableSqlValue(LogicalTable(expr, tableName, tableAlias)) -> tableName ^ " " ^ tableAlias, tableNamesAfterSet.Add(expr, tableAlias)
+        | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
+        | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
+    let whereSql, tableNamesAfterWhere = 
+        match select.WhereClause with
+        | Some(where) -> 
+            let wheresql2, tablenames3_2 = SqlValueToString(where, tableNamesAfterUpdate, settings)
+            "\r\nWHERE " ^ wheresql2, tablenames3_2
+        | None -> "", tablenames
+    "UPDATE "  ^ tableSql ^ setSql ^ whereSql
+
+
+
 
