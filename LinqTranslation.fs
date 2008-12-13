@@ -251,7 +251,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
         | :? MemberExpression as ma ->
             let inputinstancevalue =
                 if (box ma.Expression) <> null then processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings)
-                else ConstSqlValue(box None, None) // e.g. table properties and DateTime.Now.
+                else ConstSqlValue(box None, None) // e.g. table properties, DateTime.Now and null.
             match inputinstancevalue with
             | VirtualTableSqlValue(vt) -> vt.[(ma.Member :?> System.Reflection.PropertyInfo).GetGetMethod()]
             | LogicalTableSqlValue(_) -> ColumnAccessSqlValue(inputinstancevalue, (ma.Member :?> PropertyInfo))
@@ -525,7 +525,11 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
     match v with
     | ConstSqlValue(c, _) -> 
         // NB: This is probably open to sql injection...
-        let sqlstring = if c.GetType() = typeof<string> then "'" ^ c.ToString().Replace("'", "''") ^ "'" else c.ToString()
+        let sqlstring = 
+            match c with
+            | null -> "NULL"
+            | _ when c.GetType() = typeof<string> -> "'" ^ c.ToString().Replace("'", "''") ^ "'"
+            | _ -> c.ToString()
         sqlstring, tablenames
     | BindVariable(name) -> ":" ^ name, tablenames
     | BinarySqlValue(op, vLeft, vRight) ->
@@ -555,7 +559,7 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<Expression, str
         columnSql, t2
     | LogicalTableSqlValue(LogicalTable(tableExpression, tableName, tableAliasHint)) ->
         match tablenames.TryFind(tableExpression) with
-        | Some(name) -> name, tablenames
+        | Some(alias) -> alias, tablenames
         | None -> 
             let tableAlias =
                 let rec tryAlias i =
