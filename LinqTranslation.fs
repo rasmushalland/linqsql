@@ -147,7 +147,7 @@ open System.Reflection
 open System.Linq.Expressions
 
 
-type JoinType = Inner | LeftOuter
+type JoinType = Inner | LeftOuter | Cross
 type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | StringConcat | Other
 type SqlConstruct = CaseWhen
     /// An atomic expression that usually represents a physical table.
@@ -212,7 +212,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
         | SelectClauseSqlValue(sel) -> sel
         | _ -> failwith ("not sel, but " ^ (any_to_string selValue)  ^ "??")
 
-    and mergeSelect (owner : SelectClause, toBeMerged : SelectClause, joinType : JoinType option, joinCondition : SqlValue option, settings : SqlSettings) : SelectClause =
+    and mergeSelect (owner : SelectClause, toBeMerged : SelectClause, joinTypeHint : JoinType option, joinCondition : SqlValue option, settings : SqlSettings) : SelectClause =
         match 1 with
         | _ when List.is_empty toBeMerged.OrderBy = false -> failwith "Can't have ORDER BY on sub-select."
         | _ ->
@@ -229,6 +229,11 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                     | TableFrom(logicalTable) -> TableFrom(logicalTable)
                     | _ -> failwith "First table not a TableFrom??"
                 | _ -> SelectClauseFrom({toBeMerged with WhereClause = None })
+            let joinType =
+                match joinTypeHint, condition with
+                | Some(Cross), Some(cond) -> Some(Inner)
+                | _, None -> Some(Cross)
+                | _, _ -> joinTypeHint
             let newFromItem = { Table = newFromItem; JoinType = joinType; Condition = condition }
             { owner with FromClause = newFromItem :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
 
@@ -334,7 +339,11 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                     | collExpr -> JoinType.Inner, collExpr
                 let collSelectClause = 
                     let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
-                    processExpressionImplAsSelect(collExpr, tablesForJoin, None, colPropMap, settings)
+                    let alias =
+                        match resultSelector with
+                        | Some(lambda) -> Some(lambda.Parameters.[1].Name)
+                        | None -> None
+                    processExpressionImplAsSelect(collExpr, tablesForJoin, alias, colPropMap, settings)
 
                 let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None, settings)
 
@@ -598,9 +607,14 @@ and internal FromClauseToSql(from : JoinClause list, tablenames : Map<Expression
                 "(" ^ sql ^ ")", tablenames3_2
         match item.JoinType with 
         | Some (jointype) -> 
-            let joinword = match jointype with | JoinType.Inner -> "INNER" | JoinType.LeftOuter -> "LEFT"
-            let joinConditionSql, tableNamesAfterJoin = SqlValueToString((item.Condition.Value), tableNamesAfterCurrent, settings)
-            let sql = previousFromSql ^ "\r\n\t" ^ joinword ^ " JOIN " ^ tableSql ^ " ON " ^ joinConditionSql
+            let joinword = match jointype with | JoinType.Inner -> "INNER" | JoinType.LeftOuter -> "LEFT" | Cross -> "CROSS"
+            let sql, tableNamesAfterJoin = 
+                match jointype with
+                | Inner | LeftOuter -> 
+                    let joinConditionSql, tableNamesAfterJoin = SqlValueToString((item.Condition.Value), tableNamesAfterCurrent, settings)
+                    previousFromSql ^ "\r\n\t" ^ joinword ^ " JOIN " ^ tableSql ^ " ON " ^ joinConditionSql, tableNamesAfterJoin
+                | Cross -> 
+                    previousFromSql ^ "\r\n\t" ^ joinword ^ " JOIN " ^ tableSql, tableNamesAfterCurrent
             sql, tableNamesAfterJoin
         | None -> tableSql, tableNamesAfterCurrent
 
