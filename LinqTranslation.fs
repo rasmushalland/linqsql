@@ -203,6 +203,13 @@ type internal SqlSettings = {
 }
 
 
+// **************************************************************************************
+// **************************************************************************************
+// Expression tree processing.
+// **************************************************************************************
+// **************************************************************************************
+
+
 let internal (|TableAccess|_|) (aliasHint : string option) (expr : Expression) : LogicalTable option =
     let GetTableName(tabletype : System.Type) : string =
         let attArray = tabletype.GetCustomAttributes(typeof<TableAttribute>, false)
@@ -481,7 +488,12 @@ type SimpleMap<'key, 'value> (items : ('key * 'value) list) =
     interface System.Collections.IEnumerable with
         member this.GetEnumerator() = (this :> IEnumerable<_>).GetEnumerator() :> System.Collections.IEnumerator
 
+
+// **************************************************************************************
+// **************************************************************************************
 // Bind variables.
+// **************************************************************************************
+// **************************************************************************************
 
 
 let rec internal FindBindVariablesInSqlValue (v : SqlValue, binds : SimpleMap<obj, string>) : SqlValue * SimpleMap<obj, string> =
@@ -552,7 +564,11 @@ and internal FindBindVariablesInSelectClause (select : SelectClause, binds : Sim
     {select with FromClause = newfrom; WhereClause = newwhere; OrderBy = neworderby }, bindsAfterOrderby
 
 
+// **************************************************************************************
+// **************************************************************************************
 // SQL generation.
+// **************************************************************************************
+// **************************************************************************************
 
 let internal ObjComparer = new ComparisonComparer<obj>(defaultComparer)
 
@@ -646,10 +662,9 @@ and internal FromClauseToSql(from : JoinClause list, tablenames : Map<Expression
                         | _ :: _ :: _ ->
                             let settings = { settings with SelectStyle = SelectStyle.ColumnList }
                             let map(selectClause) = 
-                                let sql, tablenamesArg2 = SelectToString(selectClause, tablenames, settings)
+                                let sql, _ = SelectToString(selectClause, tablenames, settings)
                                 "\r\n\t(" ^ sql ^ ")\r\n\t"
                             List.map map argsSelectClauses
-//                            mapWithAccumulator(map, tableNamesAfterTail, argsSelectClauses)
                         | _ -> failwith <| "Less than 2 args to " ^ unionWords ^ "??"
                     "(" ^ (String.concat unionWords sqlList) ^ ")", tablenames
         match item.JoinType with 
