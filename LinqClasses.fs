@@ -56,21 +56,21 @@ type LinqProvider =
         let settings = LLL.createSettings helper
         let tmpSelectClause = Some(LinqModule.ProcessExpression(expr, settings))
         let sel, tmpBinds = LinqModule.FindBindVariablesInSelectClause(tmpSelectClause.Value, (LinqModule.SimpleMap.Empty()))
-        let sql, _ = LinqModule.SelectToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
+        let sql, _ = LinqModule.SelectToString(sel, (Map<_,_>.Empty(LinqModule.TableExpressionTokenComparer)), settings)
         new LinqProvider(sql, LLL.makeBindsDict tmpBinds)
 
     static member CreateDelete(expr : Expression, helper : LinqApplicationHelper) : LinqProvider =
         let settings = LLL.createSettings helper
         let tmpSelectClause = Some(LinqModule.ProcessExpression(expr, settings))
         let sel, tmpBinds = LinqModule.FindBindVariablesInSelectClause(tmpSelectClause.Value, (LinqModule.SimpleMap.Empty()))
-        let sql =  LinqModule.DeleteToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
+        let sql =  LinqModule.DeleteToString(sel, (Map<_,_>.Empty(LinqModule.TableExpressionTokenComparer)), settings)
         new LinqProvider(sql, LLL.makeBindsDict tmpBinds)
 
     static member CreateUpdate(expr : Expression, helper : LinqApplicationHelper) : LinqProvider =
         let settings = LLL.createSettings helper
         let tmpSelectClause = Some(LinqModule.ProcessExpression(expr, settings))
         let sel, tmpBinds = LinqModule.FindBindVariablesInSelectClause(tmpSelectClause.Value, (LinqModule.SimpleMap.Empty()))
-        let sql =  LinqModule.UpdateToString(sel, (Map<_,_>.Empty(LinqModule.ExpressionComparer)), settings)
+        let sql =  LinqModule.UpdateToString(sel, (Map<_,_>.Empty(LinqModule.TableExpressionTokenComparer)), settings)
         new LinqProvider(sql, LLL.makeBindsDict tmpBinds)
 
     member this.Sql : string = this.sql
