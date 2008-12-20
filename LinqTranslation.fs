@@ -87,6 +87,18 @@ module internal LinqPatterns =
         | Call("DefaultIfEmpty", call) -> Some(call.Arguments.[0])
         | _ -> None
 
+    let internal (|Union|_|) (expr : Expression) =
+        match expr with
+        | Call("Union", call) ->
+            let inputLeft = call.Arguments.[0]
+            let inputRight = call.Arguments.[1]
+            Some(false, inputLeft, inputRight)
+        | Call("Concat", call) ->
+            let inputLeft = call.Arguments.[0]
+            let inputRight = call.Arguments.[1]
+            Some(true, inputLeft, inputRight)
+        | _ -> None
+
 
 // TODO:
 // - Use bind variables instead of immediate values. V
@@ -147,9 +159,10 @@ open System.Reflection
 open System.Linq.Expressions
 
 
-type JoinType = Inner | LeftOuter | Cross
-type BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | StringConcat | Other
-type SqlConstruct = CaseWhen
+type internal JoinType = Inner | LeftOuter | Cross
+type internal BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | StringConcat | Other
+type internal SqlConstruct = CaseWhen
+type internal RowSetSqlConstruct = Union | UnionAll
     /// An atomic expression that usually represents a physical table.
     /// table name * alias hint.
 type internal LogicalTable = LogicalTable of Expression * string * string
@@ -167,10 +180,11 @@ and internal SqlValue =
     | CallSqlValue of string * SqlValue list
     | ColumnAccessSqlValue of SqlValue * PropertyInfo
     | SelectClauseSqlValue of SelectClause
-and internal JoinClause = { Table : FromItem; JoinType : JoinType option; Condition : SqlValue option }
-and internal FromItem =
-    | TableFrom of LogicalTable
-    | SelectClauseFrom of SelectClause
+and internal JoinClause = { RowSet : RowSet; JoinType : JoinType option; Condition : SqlValue option }
+and internal RowSet =
+    | TableRowSet of LogicalTable
+    | SelectClauseRowSet of SelectClause
+    | RowSetSqlConstruct of RowSetSqlConstruct * SelectClause list
 and internal SelectClause = { 
     FromClause : JoinClause list; 
     WhereClause : SqlValue option; 
@@ -222,26 +236,26 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 | Some(where), None -> Some(where)
                 | None, Some(condition) -> Some(condition)
                 | None, None -> None
-            let newFromItem =
+            let newRowSet =
                 match toBeMerged.FromClause with
                 | [join] ->
-                    match join.Table with
-                    | TableFrom(logicalTable) -> TableFrom(logicalTable)
-                    | _ -> failwith "First table not a TableFrom??"
-                | _ -> SelectClauseFrom({toBeMerged with WhereClause = None })
+                    match join.RowSet with
+                    | TableRowSet(logicalTable) -> TableRowSet(logicalTable)
+                    | _ -> failwith "First RowSet not a TableRowSet??"
+                | _ -> SelectClauseRowSet({toBeMerged with WhereClause = None })
             let joinType =
                 match joinTypeHint, condition with
                 | Some(Cross), Some(cond) -> Some(Inner)
                 | _, None -> Some(Cross)
                 | _, _ -> joinTypeHint
-            let newFromItem = { Table = newFromItem; JoinType = joinType; Condition = condition }
-            { owner with FromClause = newFromItem :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
+            let newRowSet = { RowSet = newRowSet; JoinType = joinType; Condition = condition }
+            { owner with FromClause = newRowSet :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
 
     and processExpressionImpl (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>, settings : SqlSettings) : SqlValue =
         match expr with
         | TableAccess tableAliasHint t -> 
             SelectClauseSqlValue(
-                { FromClause = [{ Table = TableFrom(t); JoinType = None; Condition = None }]; 
+                { FromClause = [{ RowSet = TableRowSet(t); JoinType = None; Condition = None }]; 
                   WhereClause = None; VirtualTableSqlValue = LogicalTableSqlValue t; OrderBy = [] })
 
         | :? ParameterExpression as p -> tables.[p]
@@ -351,12 +365,19 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                                     | Some(sel) -> 
                                         let joinedToTable =
                                             let lastFromClause = List.hd collSelectClause.FromClause
-                                            match lastFromClause.Table with
-                                            | TableFrom(logicalTable) -> logicalTable
-                                            | SelectClauseFrom(_) -> failwith "Can't have joined to a select clause."
+                                            match lastFromClause.RowSet with
+                                            | TableRowSet(logicalTable) -> logicalTable
+                                            | SelectClauseRowSet(_) -> failwith "Can't have joined to a select clause."
                                         let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
                                         processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap, settings)
                                     | None -> inputselectclause.VirtualTableSqlValue
+
+//                let tAfterSelect = match resultSelector with 
+//                                    | Some(sel) -> 
+//                                        let resultTableMap = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue)
+//                                        let resultTableMap = tables.Add(sel.Parameters.[1], collSelectClause.VirtualTableSqlValue)
+//                                        processExpressionImpl(sel.Body, resultTableMap, None, colPropMap, settings)
+//                                    | None -> inputselectclause.VirtualTableSqlValue
 
                 SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
 
@@ -364,7 +385,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 let leftSelectClause = 
                     let leftHint = Some(leftSelector.Parameters.[0].Name)
                     processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap, settings)
-                
+
                 let rightSelectClause = 
                     let rightHint = Some(rightSelector.Parameters.[0].Name)
                     processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap, settings)
@@ -388,6 +409,13 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                     processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap, settings)
 
                 SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
+
+            | LinqPatterns.Union(isUnionAll, leftInput, rightInput) ->
+                let l = processExpressionImplAsSelect(leftInput, tables, None, colPropMap, settings)
+                let r = processExpressionImplAsSelect(rightInput, tables, None, colPropMap, settings)
+                let construct = if isUnionAll then RowSetSqlConstruct.UnionAll else RowSetSqlConstruct.Union
+                let fromClause = [ { RowSet = RowSetSqlConstruct(construct, [l; r]); JoinType = None; Condition = None } ]
+                SelectClauseSqlValue({ FromClause = fromClause; WhereClause = None; VirtualTableSqlValue = l.VirtualTableSqlValue; OrderBy = [] }) 
 
             | LinqPatterns.Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
                 let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap, settings))
@@ -488,20 +516,23 @@ and internal FindBindVariablesInFromClause (from : JoinClause list) (binds : Sim
     | join :: jointail ->
         let newtail, b2 = FindBindVariablesInFromClause jointail binds
         let newjoin, b3 =
-            match join.Table with
-            | TableFrom(_) -> join.Table, b2
-            | SelectClauseFrom(selectclause) -> 
-                let newselectclause, b2_2 = FindBindVariablesInSelectClause selectclause b2
-                SelectClauseFrom(newselectclause), b2_2
+            match join.RowSet with
+            | TableRowSet(_) -> join.RowSet, b2
+            | SelectClauseRowSet(selectclause) -> 
+                let newselectclause, b2_2 = FindBindVariablesInSelectClause(selectclause, b2)
+                SelectClauseRowSet(newselectclause), b2_2
+            | RowSetSqlConstruct(construct, argsSelectClauses) ->
+                let newArgs, newBinds = mapWithAccumulator((fun (arg, binds) -> FindBindVariablesInSelectClause(arg, binds)), binds, argsSelectClauses)
+                RowSetSqlConstruct(construct, newArgs), newBinds
         let newcondition, b4 =
             match join.Condition with
             | Some(condition) ->
                 let newcondTmp, b4Tmp = FindBindVariablesInSqlValue(condition, b3)
                 Some(newcondTmp), b4Tmp
             | None -> None, b3
-        { join with Table = newjoin; Condition = newcondition } :: newtail, b4
+        { join with RowSet = newjoin; Condition = newcondition } :: newtail, b4
 
-and internal FindBindVariablesInSelectClause (select : SelectClause) (binds : SimpleMap<obj, string>) : SelectClause * SimpleMap<obj, string> =
+and internal FindBindVariablesInSelectClause (select : SelectClause, binds : SimpleMap<obj, string>) : SelectClause * SimpleMap<obj, string> =
     let newfrom, bindsAfterFrom = FindBindVariablesInFromClause select.FromClause binds
     let (newwhere : SqlValue option), bindsAfterWhere = 
         if select.WhereClause.IsSome then 
@@ -600,11 +631,25 @@ and internal FromClauseToSql(from : JoinClause list, tablenames : Map<Expression
     | item :: itemtail ->
         let previousFromSql, tableNamesAfterTail = FromClauseToSql(itemtail, tablenames, settings)
         let tableSql, tableNamesAfterCurrent = 
-            match item.Table with
-            | TableFrom(lt) -> SqlValueToString(LogicalTableSqlValue(lt), tableNamesAfterTail, settings)
-            | SelectClauseFrom(selectclause) -> 
+            match item.RowSet with
+            | TableRowSet(lt) -> SqlValueToString(LogicalTableSqlValue(lt), tableNamesAfterTail, settings)
+            | SelectClauseRowSet(selectclause) -> 
                 let sql, tablenames3_2 = SelectToString(selectclause, tableNamesAfterTail,  { settings with SelectStyle = SelectStyle.OnlyFrom })
                 "(" ^ sql ^ ")", tablenames3_2
+            | RowSetSqlConstruct(construct, argsSelectClauses) ->
+                match construct with
+                | Union | UnionAll ->
+                    let sqlList, newTableNames =
+                        match argsSelectClauses with
+                        | [ _; _ ] ->
+                            let settings = { settings with SelectStyle = SelectStyle.ColumnList }
+                            let map(arg, tablenamesArg) = 
+                                let sql, tablenamesArg2 = SelectToString(arg, tablenamesArg, settings)
+                                "\r\n\t(" ^ sql ^ ")\r\n\t", tablenamesArg2
+                            mapWithAccumulator(map, tablenames, argsSelectClauses)
+                        | _ -> failwith "Not 2 args to union??"
+                    let unionWords = match construct with | Union -> "UNION" | UnionAll -> "UNION ALL"
+                    "(" ^ (String.concat unionWords sqlList) ^ ")", newTableNames
         match item.JoinType with 
         | Some (jointype) -> 
             let joinword = match jointype with | JoinType.Inner -> "INNER" | JoinType.LeftOuter -> "LEFT" | Cross -> "CROSS"
