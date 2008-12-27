@@ -160,18 +160,35 @@ open System.Linq.Expressions
 
 type internal TableExpressionToken = TableExpressionToken of obj
 
+// Justification for the special SqlValues:
+// 
+// LogicalTableSqlValue:
+// This is a simple table value, and it is the first SqlValue to be created during processing.
+// It needs to somehow store a token and an alias.
+// After construction of a SelectClause it is hardly needed?
+//
+// VirtualTable:
+// Needed to support the anonymous types which are constructed.
+//
+// SelectClauseSqlValue:
+// This value is actually kept and used. Its VirtualTableSqlValue is used during construction (it actually
+// declared as an SqlValue rather than as an SqlValue
+// 
+
+
 type internal JoinType = Inner | LeftOuter | Cross
 type internal BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan | GreaterThanOrEqual | LessThan | LessThanOrEqual | Equal | NotEqual | StringConcat | Other
 type internal SqlConstruct = CaseWhen
 type internal RowSetSqlConstruct = Union | UnionAll
     /// An atomic expression that usually represents a physical table.
     /// table name * alias hint.
-type internal LogicalTable = LogicalTable of System.Type * TableExpressionToken * string * string
+type internal LogicalTable = LogicalTable of System.Type * string * TableExpressionToken * string
 and internal SqlValue =
     /// VirtualTableSqlValue represents the result of a Select call, ie. often an anonymous type.
     /// The map keys are property get methods for generated values.
     | VirtualTableSqlValue of Map<MethodInfo, SqlValue>
     | LogicalTableSqlValue of LogicalTable
+//    | LogicalTableSqlValue of LogicalTable
     /// The string option is a bind variable name suggestion.
     | ConstSqlValue of obj * string option
     | BindVariable of string
@@ -180,18 +197,23 @@ and internal SqlValue =
     | CallSqlValue of string * SqlValue list
     | ColumnAccessSqlValue of SqlValue * PropertyInfo
     | SelectClauseSqlValue of SelectClause
-and internal JoinClause = { RowSet : RowSet; JoinType : JoinType option; Condition : SqlValue option }
-and internal RowSet =
-    | TableRowSet of LogicalTable
-    | SelectClauseRowSet of SelectClause
-    /// The string is an alias hint.
-    | RowSetSqlConstruct of RowSetSqlConstruct * TableExpressionToken * string * SelectClause list
+    | TableExpressionSqlValue of SelectClause
+and internal TableExpression = {
+    Content : TableExpressionContent; 
+    Token : TableExpressionToken
+    Alias : string; 
+    JoinType : JoinType option; 
+    Condition : SqlValue option;
+}
+and internal TableExpressionContent = 
+    | LogicalTableContent of LogicalTable
+    | SelectClauseContent of SelectClause
 and internal SelectClause = { 
-    FromClause : JoinClause list; 
+    FromClause : TableExpression list; 
     WhereClause : SqlValue option; 
     VirtualTableSqlValue : SqlValue; 
     OrderBy : (SqlValue * SortDirection) list
-    AliasHint : string
+    Next : (RowSetSqlConstruct * SelectClause) option
 }
 
 type internal SelectStyle = ColumnList | OnlyFrom
@@ -211,7 +233,7 @@ type internal SqlSettings = {
 // **************************************************************************************
 
 
-let internal (|TableAccess|_|) (aliasHint : string option) (expr : Expression) : LogicalTable option =
+let internal (|TableAccess|_|) (alias : string option) (expr : Expression) : LogicalTable option =
     let GetTableName(tabletype : System.Type) : string =
         let attArray = tabletype.GetCustomAttributes(typeof<TableAttribute>, false)
         if attArray.Length = 1 then
@@ -223,7 +245,7 @@ let internal (|TableAccess|_|) (aliasHint : string option) (expr : Expression) :
     | :? ConstantExpression when typeof<IQueryable>.IsAssignableFrom(expr.Type) -> 
         let itemType = expr.Type.GetGenericArguments().[0]
         let tableName = GetTableName(itemType)
-        Some(LogicalTable(itemType, TableExpressionToken(expr), tableName, aliasHint.Value))
+        Some(LogicalTable(itemType, tableName, TableExpressionToken(expr), alias.Value))
     | _ -> None
 
 
@@ -244,27 +266,31 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 | Some(where), None -> Some(where)
                 | None, Some(condition) -> Some(condition)
                 | None, None -> None
-            let newRowSet =
+            let newContent, token, alias =
                 match toBeMerged.FromClause with
                 | [join] ->
-                    match join.RowSet with
-                    | TableRowSet(logicalTable) -> TableRowSet(logicalTable)
+                    match join.Content with
+                    | LogicalTableContent(logicalTable) -> LogicalTableContent(logicalTable), join.Token, join.Alias
                     | _ -> failwith "First RowSet not a TableRowSet??"
-                | _ -> SelectClauseRowSet({toBeMerged with WhereClause = None })
+                | _ -> 
+                    let lastTable = List.hd toBeMerged.FromClause
+                    SelectClauseContent({toBeMerged with WhereClause = None }), lastTable.Token, lastTable.Alias
             let joinType =
                 match joinTypeHint, condition with
                 | Some(Cross), Some(cond) -> Some(Inner)
                 | _, None -> Some(Cross)
                 | _, _ -> joinTypeHint
-            let newRowSet = { RowSet = newRowSet; JoinType = joinType; Condition = condition }
-            { owner with FromClause = newRowSet :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
+            let newTableExpression = { Content = newContent; Alias = alias; Token = token; JoinType = joinType; Condition = condition }
+            { owner with FromClause = newTableExpression :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
 
     and processExpressionImpl (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>, settings : SqlSettings) : SqlValue =
         match expr with
         | TableAccess tableAliasHint t -> 
-            SelectClauseSqlValue(
-                { FromClause = [{ RowSet = TableRowSet(t); JoinType = None; Condition = None; }]; 
-                  WhereClause = None; VirtualTableSqlValue = LogicalTableSqlValue t; OrderBy = []; AliasHint = tableAliasHint.Value })
+            match t with
+                | LogicalTable(itemType, tableName, token, alias) ->
+                    SelectClauseSqlValue(
+                        { FromClause = [{ Content = LogicalTableContent(t); Token = token; Alias = alias; JoinType = None; Condition = None; }]; 
+                          WhereClause = None; VirtualTableSqlValue = LogicalTableSqlValue t; OrderBy = []; Next = None })
 
         | :? ParameterExpression as p -> tables.[p]
         | :? BinaryExpression as binexp ->
@@ -373,9 +399,9 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                                     | Some(sel) -> 
                                         let joinedToTable =
                                             let lastFromClause = List.hd collSelectClause.FromClause
-                                            match lastFromClause.RowSet with
-                                            | TableRowSet(logicalTable) -> logicalTable
-                                            | SelectClauseRowSet(_) -> failwith "Can't have joined to a select clause."
+                                            match lastFromClause.Content with
+                                            | LogicalTableContent(logicalTable) -> logicalTable
+                                            | SelectClauseContent(_) -> failwith "Can't have joined to a select clause."
                                         let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
                                         processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap, settings)
                                     | None -> inputselectclause.VirtualTableSqlValue
@@ -422,8 +448,9 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 let l = processExpressionImplAsSelect(leftInput, tables, None, colPropMap, settings)
                 let r = processExpressionImplAsSelect(rightInput, tables, None, colPropMap, settings)
                 let construct = if isUnionAll then RowSetSqlConstruct.UnionAll else RowSetSqlConstruct.Union
-                let joinClause = { RowSet = RowSetSqlConstruct(construct, TableExpressionToken(new System.Object()), l.AliasHint, [l; r]); JoinType = None; Condition = None }
-                SelectClauseSqlValue({ FromClause = [ joinClause ]; WhereClause = None; VirtualTableSqlValue = l.VirtualTableSqlValue; OrderBy = []; AliasHint = l.AliasHint; })
+                SelectClauseSqlValue({ l with Next = Some(construct, r) })
+//                let joinClause = { RowSet = RowSetSqlConstruct(construct, TableExpressionToken(new System.Object()), l.AliasHint, [l; r]); JoinType = None; Condition = None }
+//                SelectClauseSqlValue({ FromClause = [ joinClause ]; WhereClause = None; VirtualTableSqlValue = l.VirtualTableSqlValue; OrderBy = []; })
 
             | LinqPatterns.Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
                 let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap, settings))
@@ -523,27 +550,27 @@ let rec internal FindBindVariablesInSqlValue (v : SqlValue, binds : SimpleMap<ob
     | VirtualTableSqlValue(_) -> failwith "virtual table??"
     | SelectClauseSqlValue(_) -> failwith "select clause??"
 
-and internal FindBindVariablesInFromClause (from : JoinClause list) (binds : SimpleMap<obj, string>) : JoinClause list * SimpleMap<obj, string> =
+and internal FindBindVariablesInFromClause (from : TableExpression list) (binds : SimpleMap<obj, string>) : TableExpression list * SimpleMap<obj, string> =
     match from with 
     | [] -> from, binds
     | join :: jointail ->
         let newtail, b2 = FindBindVariablesInFromClause jointail binds
         let newjoin, b3 =
-            match join.RowSet with
-            | TableRowSet(_) -> join.RowSet, b2
-            | SelectClauseRowSet(selectclause) -> 
+            match join.Content with
+            | LogicalTableContent(_) -> join.Content, b2
+            | SelectClauseContent(selectclause) -> 
                 let newselectclause, b2_2 = FindBindVariablesInSelectClause(selectclause, b2)
-                SelectClauseRowSet(newselectclause), b2_2
-            | RowSetSqlConstruct(construct, tableToken, aliasHint, argsSelectClauses) ->
-                let newArgs, newBinds = mapWithAccumulator((fun (arg, binds) -> FindBindVariablesInSelectClause(arg, binds)), binds, argsSelectClauses)
-                RowSetSqlConstruct(construct, tableToken, aliasHint, newArgs), newBinds
+                SelectClauseContent(newselectclause), b2_2
+//            | RowSetSqlConstruct(construct, tableToken, aliasHint, argsSelectClauses) ->
+//                let newArgs, newBinds = mapWithAccumulator((fun (arg, binds) -> FindBindVariablesInSelectClause(arg, binds)), binds, argsSelectClauses)
+//                RowSetSqlConstruct(construct, tableToken, aliasHint, newArgs), newBinds
         let newcondition, b4 =
             match join.Condition with
             | Some(condition) ->
                 let newcondTmp, b4Tmp = FindBindVariablesInSqlValue(condition, b3)
                 Some(newcondTmp), b4Tmp
             | None -> None, b3
-        { join with RowSet = newjoin; Condition = newcondition } :: newtail, b4
+        { join with Content = newjoin; Condition = newcondition } :: newtail, b4
 
 and internal FindBindVariablesInSelectClause (select : SelectClause, binds : SimpleMap<obj, string>) : SelectClause * SimpleMap<obj, string> =
     let newfrom, bindsAfterFrom = FindBindVariablesInFromClause select.FromClause binds
@@ -637,41 +664,41 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<TableExpression
         let tableAlias, t2 = SqlValueToString(table, tablenames, settings)
         let columnSql = GetColumnSql(colPropertyInfo, tableAlias, false)
         columnSql, t2
-    | LogicalTableSqlValue(LogicalTable(_, tableToken, tableName, tableAliasHint)) ->
+    | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, alias)) ->
         match tablenames.TryFind(tableToken) with
         | Some(alias) -> alias, tablenames
         | None -> 
-            let alias, tablenames = GetAlias(tablenames, tableToken, tableAliasHint)
+            let alias, tablenames = GetAlias(tablenames, tableToken, alias)
             tableName ^ " " ^ alias, tablenames
     | VirtualTableSqlValue(_) -> failwith "virtual table??"
     | SelectClauseSqlValue(_) -> raise <| new System.NotSupportedException("select clause")
 
-and internal FromClauseToSql(from : JoinClause list, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string * Map<TableExpressionToken, string> =
+and internal FromClauseToSql(from : TableExpression list, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string * Map<TableExpressionToken, string> =
     match from with
     | [] -> "", tablenames
     | item :: itemtail ->
         let previousFromSql, tableNamesAfterTail = FromClauseToSql(itemtail, tablenames, settings)
         let tableSql, tableNamesAfterCurrent = 
-            match item.RowSet with
-            | TableRowSet(lt) -> SqlValueToString(LogicalTableSqlValue(lt), tableNamesAfterTail, settings)
-            | SelectClauseRowSet(selectclause) -> 
+            match item.Content with
+            | LogicalTableContent(lt) -> SqlValueToString(LogicalTableSqlValue(lt), tableNamesAfterTail, settings)
+            | SelectClauseContent(selectclause) -> 
                 let sql, tablenames3_2 = SelectToString(selectclause, tableNamesAfterTail,  { settings with SelectStyle = SelectStyle.OnlyFrom })
                 "(" ^ sql ^ ")", tablenames3_2
-            | RowSetSqlConstruct(construct, tableToken, aliasHint, argsSelectClauses) ->
-                match construct with
-                | Union | UnionAll ->
-                    let unionWords = match construct with | Union -> "UNION" | UnionAll -> "UNION ALL"
-                    let sqlList =
-                        match argsSelectClauses with
-                        | _ :: _ :: _ ->
-                            let settings = { settings with SelectStyle = SelectStyle.ColumnList }
-                            let map(selectClause) = 
-                                let sql, _ = SelectToString(selectClause, tablenames, settings)
-                                "\r\n\t(" ^ sql ^ ")\r\n\t"
-                            List.map map argsSelectClauses
-                        | _ -> failwith <| "Less than 2 args to " ^ unionWords ^ "??"
-                    let alias, tablenames = GetAlias(tablenames, tableToken, aliasHint)
-                    "(" ^ (String.concat unionWords sqlList) ^ ") " ^ alias, tablenames
+//            | RowSetSqlConstruct(construct, tableToken, aliasHint, argsSelectClauses) ->
+//                match construct with
+//                | Union | UnionAll ->
+//                    let unionWords = match construct with | Union -> "UNION" | UnionAll -> "UNION ALL"
+//                    let sqlList =
+//                        match argsSelectClauses with
+//                        | _ :: _ :: _ ->
+//                            let settings = { settings with SelectStyle = SelectStyle.ColumnList }
+//                            let map(selectClause) = 
+//                                let sql, _ = SelectToString(selectClause, tablenames, settings)
+//                                "\r\n\t(" ^ sql ^ ")\r\n\t"
+//                            List.map map argsSelectClauses
+//                        | _ -> failwith <| "Less than 2 args to " ^ unionWords ^ "??"
+//                    let alias, tablenames = GetAlias(tablenames, tableToken, aliasHint)
+//                    "(" ^ (String.concat unionWords sqlList) ^ ") " ^ alias, tablenames
         match item.JoinType with 
         | Some (jointype) -> 
             let joinword = match jointype with | JoinType.Inner -> "INNER" | JoinType.LeftOuter -> "LEFT" | Cross -> "CROSS"
@@ -729,7 +756,7 @@ and internal SelectToString(select : SelectClause, tablenames : Map<TableExpress
 let internal DeleteToString(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string =
     let getTableSql sqlTableVal = 
         match sqlTableVal with
-        | LogicalTableSqlValue(LogicalTable(_, tableToken, tableName, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(tableToken, tableAlias)
+        | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(tableToken, tableAlias)
         | _ -> failwith ("notsup: " ^ sqlTableVal.GetType().ToString())
     let tableSql, tableNamesAfterFrom = getTableSql (select.VirtualTableSqlValue)
     let whereSql, tableNamesAfterWhere = 
@@ -743,12 +770,12 @@ let internal DeleteToString(select : SelectClause, tablenames : Map<TableExpress
 let internal UpdateToString(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string =
     let setSql, tableNamesAfterSet =
         match select.VirtualTableSqlValue with
-        | LogicalTableSqlValue(LogicalTable(_, tableToken, tableName, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(tableToken, tableAlias)
+        | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(tableToken, tableAlias)
         | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
         | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
     let tableSql, tableNamesAfterUpdate =
         match select.VirtualTableSqlValue with
-        | LogicalTableSqlValue(LogicalTable(_, tableToken, tableName, tableAlias)) -> tableName ^ " " ^ tableAlias, tableNamesAfterSet.Add(tableToken, tableAlias)
+        | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tableNamesAfterSet.Add(tableToken, tableAlias)
         | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
         | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
     let whereSql, tableNamesAfterWhere = 
@@ -758,7 +785,6 @@ let internal UpdateToString(select : SelectClause, tablenames : Map<TableExpress
             "\r\nWHERE " ^ wheresql2, tablenames3_2
         | None -> "", tablenames
     "UPDATE "  ^ tableSql ^ setSql ^ whereSql
-
 
 
 
