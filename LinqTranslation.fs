@@ -449,8 +449,6 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 let r = processExpressionImplAsSelect(rightInput, tables, None, colPropMap, settings)
                 let construct = if isUnionAll then RowSetSqlConstruct.UnionAll else RowSetSqlConstruct.Union
                 SelectClauseSqlValue({ l with Next = Some(construct, r) })
-//                let joinClause = { RowSet = RowSetSqlConstruct(construct, TableExpressionToken(new System.Object()), l.AliasHint, [l; r]); JoinType = None; Condition = None }
-//                SelectClauseSqlValue({ FromClause = [ joinClause ]; WhereClause = None; VirtualTableSqlValue = l.VirtualTableSqlValue; OrderBy = []; })
 
             | LinqPatterns.Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
                 let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap, settings))
@@ -561,9 +559,6 @@ and internal FindBindVariablesInFromClause (from : TableExpression list) (binds 
             | SelectClauseContent(selectclause) -> 
                 let newselectclause, b2_2 = FindBindVariablesInSelectClause(selectclause, b2)
                 SelectClauseContent(newselectclause), b2_2
-//            | RowSetSqlConstruct(construct, tableToken, aliasHint, argsSelectClauses) ->
-//                let newArgs, newBinds = mapWithAccumulator((fun (arg, binds) -> FindBindVariablesInSelectClause(arg, binds)), binds, argsSelectClauses)
-//                RowSetSqlConstruct(construct, tableToken, aliasHint, newArgs), newBinds
         let newcondition, b4 =
             match join.Condition with
             | Some(condition) ->
@@ -588,7 +583,13 @@ and internal FindBindVariablesInSelectClause (select : SelectClause, binds : Sim
                 (sv2, dir) :: newtail, b3
             | [] -> [], binds
         searchInOrderByPairs select.OrderBy bindsAfterWhere
-    {select with FromClause = newfrom; WhereClause = newwhere; OrderBy = neworderby }, bindsAfterOrderby
+    let newNext, binds =
+        match select.Next with
+        | None -> None, bindsAfterOrderby
+        | Some(construct, nextSelect) -> 
+            let adf, binds = FindBindVariablesInSelectClause(nextSelect, bindsAfterOrderby)
+            Some(construct, adf), binds
+    {select with FromClause = newfrom; WhereClause = newwhere; OrderBy = neworderby; Next = newNext; }, bindsAfterOrderby
 
 
 // **************************************************************************************
@@ -682,23 +683,8 @@ and internal FromClauseToSql(from : TableExpression list, tablenames : Map<Table
             match item.Content with
             | LogicalTableContent(lt) -> SqlValueToString(LogicalTableSqlValue(lt), tableNamesAfterTail, settings)
             | SelectClauseContent(selectclause) -> 
-                let sql, tablenames3_2 = SelectToString(selectclause, tableNamesAfterTail,  { settings with SelectStyle = SelectStyle.OnlyFrom })
+                let sql, tablenames3_2 = SelectToStringImpl(selectclause, tableNamesAfterTail,  { settings with SelectStyle = SelectStyle.OnlyFrom })
                 "(" ^ sql ^ ")", tablenames3_2
-//            | RowSetSqlConstruct(construct, tableToken, aliasHint, argsSelectClauses) ->
-//                match construct with
-//                | Union | UnionAll ->
-//                    let unionWords = match construct with | Union -> "UNION" | UnionAll -> "UNION ALL"
-//                    let sqlList =
-//                        match argsSelectClauses with
-//                        | _ :: _ :: _ ->
-//                            let settings = { settings with SelectStyle = SelectStyle.ColumnList }
-//                            let map(selectClause) = 
-//                                let sql, _ = SelectToString(selectClause, tablenames, settings)
-//                                "\r\n\t(" ^ sql ^ ")\r\n\t"
-//                            List.map map argsSelectClauses
-//                        | _ -> failwith <| "Less than 2 args to " ^ unionWords ^ "??"
-//                    let alias, tablenames = GetAlias(tablenames, tableToken, aliasHint)
-//                    "(" ^ (String.concat unionWords sqlList) ^ ") " ^ alias, tablenames
         match item.JoinType with 
         | Some (jointype) -> 
             let joinword = match jointype with | JoinType.Inner -> "INNER" | JoinType.LeftOuter -> "LEFT" | Cross -> "CROSS"
@@ -712,7 +698,7 @@ and internal FromClauseToSql(from : TableExpression list, tablenames : Map<Table
             sql, tableNamesAfterJoin
         | None -> tableSql, tableNamesAfterCurrent
 
-and internal SelectToString(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string * Map<TableExpressionToken, string> =
+and internal SelectToStringImpl(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string * Map<TableExpressionToken, string> =
     let fromsql, tableNamesAfterFrom = FromClauseToSql(select.FromClause, tablenames, settings)
     let wheresql, tableNamesAfterWhere = 
         match select.WhereClause with
@@ -751,6 +737,17 @@ and internal SelectToString(select : SelectClause, tablenames : Map<TableExpress
     match settings.SelectStyle with
     | ColumnList -> "SELECT " ^ columnsSql ^ "\r\nFROM " ^ fromsql ^ wheresql ^ orderbysql, tableNamesAfterWhere
     | OnlyFrom -> fromsql ^ wheresql ^ orderbysql, tableNamesAfterWhere
+
+and internal SelectToString(select : SelectClause, settings : SqlSettings) : string =
+    let sql, _ = SelectToStringImpl(select, (Map<_,_>.Empty(TableExpressionTokenComparer)), settings)
+    match select.Next with
+    | Some(construct, nextSelect) ->
+        match construct with
+        | Union | UnionAll ->
+            let unionWords = match construct with | Union -> "UNION" | UnionAll -> "UNION ALL"
+            let nextSql = SelectToString(nextSelect, settings)
+            sql ^ "\r\n" ^ unionWords ^ "\r\n" ^ nextSql
+    | None -> sql
 
 
 let internal DeleteToString(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string =
