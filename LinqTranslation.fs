@@ -116,6 +116,7 @@ module internal LinqPatterns =
 // - group by.
 // - Aggregate functions.
 // - "numlist2table".
+// - UNION and friends currently cannot be composed.
 
 // Lectio:
 // - Use LectioDbAccess. v
@@ -141,6 +142,7 @@ let defaultComparer ((x : 'a), (y : 'a )) =
 let internal ExpressionComparer = new ComparisonComparer<Expression>(defaultComparer)
 let internal ParameterExpressionComparer = new ComparisonComparer<ParameterExpression>(defaultComparer)
 let internal MethodInfoComparer = new ComparisonComparer<MethodInfo>(defaultComparer)
+let internal PropertyInfoComparer = new ComparisonComparer<PropertyInfo>(defaultComparer)
 
 let internal mapWithAccumulator<'a, 'b, 'c>(f : ('a * 'c) -> ('b * 'c), initialState : 'c, s : 'a list ) : 'b list * 'c = 
     let rec ff(itemlist, state) =
@@ -186,7 +188,7 @@ type internal LogicalTable = LogicalTable of System.Type * string * TableExpress
 and internal SqlValue =
     /// VirtualTableSqlValue represents the result of a Select call, ie. often an anonymous type.
     /// The map keys are property get methods for generated values.
-    | VirtualTableSqlValue of Map<MethodInfo, SqlValue>
+    | VirtualTableSqlValue of Map<PropertyInfo, SqlValue>
     | LogicalTableSqlValue of LogicalTable
 //    | LogicalTableSqlValue of LogicalTable
     /// The string option is a bind variable name suggestion.
@@ -312,13 +314,14 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                     | _ -> CallSqlValue("coalesce", [newLeft; newRight])
                 | _ -> failwith <| sprintf "binary huh?: %s" (binexp.NodeType.ToString())
             | _ -> BinarySqlValue(binop, newLeft, newRight)
-        | :? UnaryExpression as unary when unary.Method = null && unary.IsLiftedToNull -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap, settings)
+//        | :? UnaryExpression as unary when unary.Method = null && unary.IsLiftedToNull -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap, settings)
+        | :? UnaryExpression as unary  -> processExpressionImpl(unary.Operand, tables, tableAliasHint, colPropMap, settings)
         | :? MemberExpression as ma ->
             let inputinstancevalue =
                 if (box ma.Expression) <> null then processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings)
                 else ConstSqlValue(box None, None) // e.g. table properties, DateTime.Now and null.
             match inputinstancevalue with
-            | VirtualTableSqlValue(vt) -> vt.[(ma.Member :?> System.Reflection.PropertyInfo).GetGetMethod()]
+            | VirtualTableSqlValue(vt) -> vt.[ma.Member :?> System.Reflection.PropertyInfo]
             | LogicalTableSqlValue(_) -> ColumnAccessSqlValue(inputinstancevalue, (ma.Member :?> PropertyInfo))
             | ConstSqlValue(instance, _) -> 
                 let v, name, preCookedSqlValue = 
@@ -337,18 +340,20 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
         | :? ConstantExpression as ce -> ConstSqlValue(ce.Value, None)
         | :? NewExpression as newExpr ->
             let aa = newExpr.Members.First().DeclaringType
-            let pairs = List.zip (newExpr.Members |> Seq.map (fun memberinfo -> memberinfo :?> System.Reflection.MethodInfo) |> Seq.to_list) (newExpr.Arguments |> Seq.to_list)
-            let foldFunc (statemap : Map<MethodInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
-            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) pairs
+            let propertyInfos =
+                let getpi mi = aa.GetProperties() |> Seq.find (fun pi -> pi.GetGetMethod() = mi)
+                (newExpr.Members |> Seq.map (fun memberinfo -> getpi (memberinfo :?> System.Reflection.MethodInfo)) |> Seq.to_list)
+            let pairs = List.zip propertyInfos (newExpr.Arguments |> Seq.to_list)
+            let foldFunc (statemap : Map<PropertyInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
+            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) pairs
             VirtualTableSqlValue(m2)
         | :? MemberInitExpression as mi ->
             // Throw away the NewExpression - since there is a MemberInitExpression, the constructur call can reasonably be ignored.
 //            let newExprSqlValue = processExpressionImpl(mi, tables, tableAliasHint, colPropMap, settings)
             let memberAssBindings = mi.Bindings |> Seq.map (fun binding -> binding :?> MemberAssignment) |> Seq.to_list
-            let foldFunc (statemap : Map<MethodInfo, SqlValue>) (ma : MemberAssignment) = 
-                let methodInfo = (ma.Member :?> PropertyInfo).GetGetMethod()
-                statemap.Add(methodInfo, processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings))
-            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(MethodInfoComparer)) memberAssBindings
+            let foldFunc (statemap : Map<PropertyInfo, SqlValue>) (ma : MemberAssignment) = 
+                statemap.Add((ma.Member :?> PropertyInfo), processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings))
+            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) memberAssBindings
             VirtualTableSqlValue(m2)
         | :? ConditionalExpression as ce ->
             let test = processExpressionImpl(ce.Test, tables, tableAliasHint, colPropMap, settings)
@@ -769,7 +774,7 @@ let internal UpdateToString(select : SelectClause, tablenames : Map<TableExpress
         match select.VirtualTableSqlValue with
         | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(tableToken, tableAlias)
         | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
-        | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
+            | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
     let tableSql, tableNamesAfterUpdate =
         match select.VirtualTableSqlValue with
         | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tableNamesAfterSet.Add(tableToken, tableAlias)
