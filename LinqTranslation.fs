@@ -183,7 +183,7 @@ type internal BinaryOperator = | AndAlso | OrElse | Add | Subtract | GreaterThan
 type internal SqlConstruct = CaseWhen
 type internal RowSetSqlConstruct = Union | UnionAll
     /// An atomic expression that usually represents a physical table.
-    /// table name * alias hint.
+    /// Item type * table name * table instance token * alias hint.
 type internal LogicalTable = LogicalTable of System.Type * string * TableExpressionToken * string
 and internal SqlValue =
     /// VirtualTableSqlValue represents the result of a Select call, ie. often an anonymous type.
@@ -235,13 +235,14 @@ type internal SqlSettings = {
 // **************************************************************************************
 
 
+let internal GetTableName(tabletype : System.Type) : string =
+    let attArray = tabletype.GetCustomAttributes(typeof<TableAttribute>, false)
+    if attArray.Length = 1 then
+        let att = attArray.[0] :?> TableAttribute
+        if System.String.IsNullOrEmpty(att.Name) = false then att.Name else tabletype.Name
+    else tabletype.Name
+
 let internal (|TableAccess|_|) (alias : string option) (expr : Expression) : LogicalTable option =
-    let GetTableName(tabletype : System.Type) : string =
-        let attArray = tabletype.GetCustomAttributes(typeof<TableAttribute>, false)
-        if attArray.Length = 1 then
-            let att = attArray.[0] :?> TableAttribute
-            if System.String.IsNullOrEmpty(att.Name) = false then att.Name else tabletype.Name
-        else tabletype.Name
     match expr with
          // Første, konstante IQ.
     | :? ConstantExpression when typeof<IQueryable>.IsAssignableFrom(expr.Type) -> 
@@ -770,23 +771,41 @@ let internal DeleteToString(select : SelectClause, tablenames : Map<TableExpress
     "DELETE FROM " ^ tableSql ^ whereSql
 
 let internal UpdateToString(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string =
-    let setSql, tableNamesAfterSet =
+    let tableSql, tablenames =
+        // We need to get the table declared with alias up front ("UPDATE Table myalias ..."), and we can't use the new row for this.
+        if List.is_empty select.FromClause then failwith "Empty FROM clause for update?"
+        else
+            let tableExpr = List.nth select.FromClause ((List.length select.FromClause) - 1)
+            match tableExpr.Content with
+            | LogicalTableContent(lt) -> SqlValueToString(LogicalTableSqlValue(lt), tablenames, settings)
+            | _ -> failwith "First UPDATE table expression must be a table."
+        
+//        match select.VirtualTableSqlValue with
+//        | VirtualTableSqlValue(map) ->
+//            if map.IsEmpty then failwith "Empty column map??"
+//            else 
+//                let pi = (Seq.hd map).Key
+//                GetTableName(pi.DeclaringType), tablenames
+//        | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
+    let setSql, tablenames =
         match select.VirtualTableSqlValue with
-        | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tablenames.Add(tableToken, tableAlias)
-        | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
-            | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
-    let tableSql, tableNamesAfterUpdate =
-        match select.VirtualTableSqlValue with
-        | LogicalTableSqlValue(LogicalTable(_, tableName, tableToken, tableAlias)) -> tableName ^ " " ^ tableAlias, tableNamesAfterSet.Add(tableToken, tableAlias)
-        | VirtualTableSqlValue(map) -> failwith "virtual tables are not supported."
+        | VirtualTableSqlValue(map) -> 
+            let createOneColumnUpdate(pi, newValue) =
+                let col = GetColumnSql(pi, "XXXX", false)
+                let newValueSql, _ = SqlValueToString(newValue, tablenames, settings)
+                col ^ " = " ^ newValueSql
+            let setSql =
+                Seq.map (fun (kvp : KeyValuePair<_, _>) -> createOneColumnUpdate(kvp.Key, kvp.Value)) map
+                    |> String.concat ", "
+            setSql, tablenames
         | _ -> failwith ("notsup: " ^ select.VirtualTableSqlValue.GetType().ToString())
-    let whereSql, tableNamesAfterWhere = 
+    let whereSql, tablenames = 
         match select.WhereClause with
         | Some(where) -> 
-            let wheresql2, tablenames3_2 = SqlValueToString(where, tableNamesAfterUpdate, settings)
+            let wheresql2, tablenames3_2 = SqlValueToString(where, tablenames, settings)
             "\r\nWHERE " ^ wheresql2, tablenames3_2
         | None -> "", tablenames
-    "UPDATE "  ^ tableSql ^ setSql ^ whereSql
+    "UPDATE "  ^ tableSql ^ "\r\nSET " ^ setSql ^ whereSql
 
 
 
