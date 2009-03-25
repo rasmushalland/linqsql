@@ -2,6 +2,7 @@
 
 module LinqModule
 
+open System
 open System.Linq
 open System.Linq.Expressions
 
@@ -132,12 +133,12 @@ open Microsoft.FSharp.Collections.Tagged
 open System.Data.Linq.Mapping
 
 type internal ComparisonComparer<'a>(cmp : 'a * 'a -> int) =
-    interface System.Collections.Generic.IComparer<'a> with
+    interface Collections.Generic.IComparer<'a> with
         override this.Compare(x, y) = cmp(x, y)
 // TODO: handle hash collisions better.
 let defaultComparer ((x : 'a), (y : 'a )) =
     match x.GetHashCode() - y.GetHashCode() with
-    | 0 when not (System.Object.ReferenceEquals(x, y)) -> failwith "Hash collision."
+    | 0 when not (Object.ReferenceEquals(x, y)) -> failwith "Hash collision."
     | diff -> diff
 let internal ExpressionComparer = new ComparisonComparer<Expression>(defaultComparer)
 let internal ParameterExpressionComparer = new ComparisonComparer<ParameterExpression>(defaultComparer)
@@ -184,7 +185,7 @@ type internal SqlConstruct = CaseWhen
 type internal RowSetSqlConstruct = Union | UnionAll
     /// An atomic expression that usually represents a physical table.
     /// Item type * table name * table instance token * alias hint.
-type internal LogicalTable = LogicalTable of System.Type * string * TableExpressionToken * string
+type internal LogicalTable = LogicalTable of Type * string * TableExpressionToken * string
 and internal SqlValue =
     /// VirtualTableSqlValue represents the result of a Select call, ie. often an anonymous type.
     /// The map keys are property get methods for generated values.
@@ -222,7 +223,7 @@ type internal SelectStyle = ColumnList | OnlyFrom
 
 
 type internal SqlSettings = {
-    GetColumnsForSelect :  System.Type * string * string  -> string option;
+    GetColumnsForSelect :  Type * string * string  -> string option;
     TranslateCall : MethodCallExpression -> string option
     SelectStyle : SelectStyle;
 }
@@ -235,11 +236,11 @@ type internal SqlSettings = {
 // **************************************************************************************
 
 
-let internal GetTableName(tabletype : System.Type) : string =
+let internal GetTableName(tabletype : Type) : string =
     let attArray = tabletype.GetCustomAttributes(typeof<TableAttribute>, false)
     if attArray.Length = 1 then
         let att = attArray.[0] :?> TableAttribute
-        if System.String.IsNullOrEmpty(att.Name) = false then att.Name else tabletype.Name
+        if String.IsNullOrEmpty(att.Name) = false then att.Name else tabletype.Name
     else tabletype.Name
 
 let internal (|TableAccess|_|) (alias : string option) (expr : Expression) : LogicalTable option =
@@ -299,7 +300,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
         | :? BinaryExpression as binexp ->
             let binop = 
                 match binexp.NodeType with 
-                | ExpressionType.Add -> if binexp.Type = typeof<System.String> then StringConcat else Add 
+                | ExpressionType.Add -> if binexp.Type = typeof<String> then StringConcat else Add 
                 | ExpressionType.Subtract -> Subtract | ExpressionType.GreaterThan -> GreaterThan | ExpressionType.GreaterThanOrEqual -> GreaterThanOrEqual 
                 | ExpressionType.AndAlso -> AndAlso | ExpressionType.OrElse -> OrElse | ExpressionType.LessThan -> LessThan | ExpressionType.LessThanOrEqual -> LessThanOrEqual 
                 | ExpressionType.Equal -> Equal | ExpressionType.NotEqual -> NotEqual | ExpressionType.Coalesce -> Other
@@ -322,7 +323,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 if (box ma.Expression) <> null then processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings)
                 else ConstSqlValue(box None, None) // e.g. table properties, DateTime.Now and null.
             match inputinstancevalue with
-            | VirtualTableSqlValue(vt) -> vt.[ma.Member :?> System.Reflection.PropertyInfo]
+            | VirtualTableSqlValue(vt) -> vt.[ma.Member :?> Reflection.PropertyInfo]
             | LogicalTableSqlValue(_) -> ColumnAccessSqlValue(inputinstancevalue, (ma.Member :?> PropertyInfo))
             | ConstSqlValue(instance, _) -> 
                 let v, name, preCookedSqlValue = 
@@ -343,7 +344,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
             let aa = newExpr.Members.First().DeclaringType
             let propertyInfos =
                 let getpi mi = aa.GetProperties() |> Seq.find (fun pi -> pi.GetGetMethod() = mi)
-                (newExpr.Members |> Seq.map (fun memberinfo -> getpi (memberinfo :?> System.Reflection.MethodInfo)) |> Seq.to_list)
+                (newExpr.Members |> Seq.map (fun memberinfo -> getpi (memberinfo :?> Reflection.MethodInfo)) |> Seq.to_list)
             let pairs = List.zip propertyInfos (newExpr.Arguments |> Seq.to_list)
             let foldFunc (statemap : Map<PropertyInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
             let m2 = List.fold_left foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) pairs
@@ -463,7 +464,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                     let makeArgument (param : ParameterInfo, sqlValue) : obj =
                         match sqlValue with
                         | ConstSqlValue(v, _) -> v
-                        | _ when param.ParameterType.IsValueType -> System.Activator.CreateInstance(param.ParameterType)
+                        | _ when param.ParameterType.IsValueType -> Activator.CreateInstance(param.ParameterType)
                         | _ -> box None
                     let argsArray = argPairs |> Seq.map makeArgument |> Seq.to_array
                     callExpr.Method.Invoke(None, argsArray) :?> IQueryable
@@ -473,7 +474,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                         | ConstSqlValue(_, _) -> None
                         | ColumnAccessSqlValue(_, _) -> Some(param.Name, sqlValue)
                         | _ -> failwith ("Can only parameterize views with constants and column properties.")
-                    let emptyColPropMap = Map<string, SqlValue>.Empty(System.StringComparer.Ordinal)
+                    let emptyColPropMap = Map<string, SqlValue>.Empty(StringComparer.Ordinal)
                     Seq.choose makeColPairs argPairs 
                     |> Seq.fold (fun (colPropMap2 : Map<string, SqlValue>) (propname, sqlValue) -> colPropMap2.Add(propname, sqlValue)) emptyColPropMap
 
@@ -494,7 +495,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
 
         | _ -> failwith ("argh12: " ^ expr.NodeType.ToString() ^ ": " ^ expr.ToString())
 
-    let s = processExpressionImpl(expr, Map<_,_>.Empty(ParameterExpressionComparer), None, Map<string, SqlValue>.Empty(System.StringComparer.Ordinal), settings)
+    let s = processExpressionImpl(expr, Map<_,_>.Empty(ParameterExpressionComparer), None, Map<string, SqlValue>.Empty(StringComparer.Ordinal), settings)
     match s with
     | SelectClauseSqlValue(sel) -> sel
     | _ -> failwith "not select??"
@@ -516,8 +517,8 @@ type SimpleMap<'key, 'value> (items : ('key * 'value) list) =
             let seq = items |> Seq.of_list |> Seq.map (fun (k, v) -> new KeyValuePair<_,_>(k, v))
             seq.GetEnumerator()
     
-    interface System.Collections.IEnumerable with
-        member this.GetEnumerator() = (this :> IEnumerable<_>).GetEnumerator() :> System.Collections.IEnumerator
+    interface Collections.IEnumerable with
+        member this.GetEnumerator() = (this :> IEnumerable<_>).GetEnumerator() :> Collections.IEnumerator
 
 
 // **************************************************************************************
@@ -615,9 +616,9 @@ let internal GetColumnSql(columnPropertyInfo : PropertyInfo, tableAlias : string
     let attArray = columnPropertyInfo.GetCustomAttributes(typeof<ColumnAttribute>, false)
     if attArray.Length = 1 then 
         let colAtt = attArray.[0] :?> ColumnAttribute
-        let colName = if System.String.IsNullOrEmpty(colAtt.Name) = false then colAtt.Name else columnPropertyInfo.Name
-        if System.String.IsNullOrEmpty(colAtt.Expression) = false then
-            let expressionString = System.String.Format(colAtt.Expression, tableAlias)
+        let colName = if String.IsNullOrEmpty(colAtt.Name) = false then colAtt.Name else columnPropertyInfo.Name
+        if String.IsNullOrEmpty(colAtt.Expression) = false then
+            let expressionString = String.Format(colAtt.Expression, tableAlias)
             if includeColumnAliasIfNecessary then expressionString ^ " " ^ colName else expressionString
         else tableAlias ^ "." ^ colName
     else tableAlias ^ "." ^ columnPropertyInfo.Name
@@ -678,7 +679,7 @@ let rec internal SqlValueToString(v : SqlValue, tablenames : Map<TableExpression
             let alias, tablenames = GetAlias(tablenames, tableToken, alias)
             tableName ^ " " ^ alias, tablenames
     | VirtualTableSqlValue(_) -> failwith "virtual table??"
-    | SelectClauseSqlValue(_) -> raise <| new System.NotSupportedException("select clause")
+    | SelectClauseSqlValue(_) -> raise <| new NotSupportedException("select clause")
 
 and internal FromClauseToSql(from : TableExpression list, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string * Map<TableExpressionToken, string> =
     match from with
@@ -721,7 +722,7 @@ and internal SelectToStringImpl(select : SelectClause, tablenames : Map<TableExp
                 partSql ^ directionWord
             let parts = select.OrderBy |> List.map partmapper |> List.to_seq |> String.concat ", "
             "\r\nORDER BY " ^ parts
-    let getClassColNames(itemType : System.Type, tableAlias : string) =
+    let getClassColNames(itemType : Type, tableAlias : string) =
         let getClassColNamesDefaultImpl() = 
             let requireColumnAttribute = false
             let propertyinfos = itemType.GetProperties()

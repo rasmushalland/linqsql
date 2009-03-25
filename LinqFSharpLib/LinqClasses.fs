@@ -2,6 +2,7 @@
 
 namespace LinqTranslation
 
+open System
 open System.Linq
 open System.Linq.Expressions
 open System.Collections.Generic
@@ -12,7 +13,7 @@ open Microsoft.FSharp.Collections.Tagged
 
 type LinqApplicationHelper() =
     abstract member GetColumnsForSelect : 
-        tableType : System.Type * 
+        tableType : Type * 
         tableAlias : string *
         columnNamePrefix : string 
             -> string
@@ -30,7 +31,7 @@ module internal LLL =
         let helper = match box helper with | null -> new LinqApplicationHelper() | _  -> helper
         let getcolsforselect(tableType, tableAlias, columnNamePrefix) =
             match helper.GetColumnsForSelect(tableType, tableAlias, columnNamePrefix) with | null -> None | s -> Some(s)
-        let translatecall callExpr = match helper.TranslateCall(callExpr) with | v when System.String.IsNullOrEmpty(v) -> None | c -> Some(c)
+        let translatecall callExpr = match helper.TranslateCall(callExpr) with | v when String.IsNullOrEmpty(v) -> None | c -> Some(c)
         {
             GetColumnsForSelect = getcolsforselect;
             TranslateCall = translatecall;
