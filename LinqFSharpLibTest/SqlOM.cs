@@ -410,7 +410,7 @@ namespace LinqTestConsoleApp.SqlOM
 	}
 
 
-	[Table(Name = "student")]
+	[Table(Name = "PurchaseOrder")]
 	class PurchaseOrder
 	{
 		[Column(Name = "id")]
@@ -435,12 +435,12 @@ namespace LinqTestConsoleApp.SqlOM
 		public DateTime AvailabilityTo { get; private set; }
 	}
 
-	[Table(Name = "student_holdelement")]
+	[Table(Name = "OrderDetail")]
 	class OrderDetail
 	{
-		[Column(Name = "student_id")]
+		[Column(Name = "Order_ID")]
 		public long OrderID { get; private set; }
-		[Column(Name = "holdelement_id")]
+		[Column(Name = "Product_ID")]
 		public long ProductID { get; private set; }
 
 		public DateTime StartDate { get; set; }
