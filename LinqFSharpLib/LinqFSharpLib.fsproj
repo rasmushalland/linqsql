@@ -50,6 +50,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="LinqTranslation.fs" />
+    <Compile Include="SqlGeneration.fs" />
     <Compile Include="LinqClasses.fs" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath)\FSharp\1.0\Microsoft.FSharp.Targets" />
