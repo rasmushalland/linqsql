@@ -12,7 +12,7 @@ open Microsoft.FSharp.Collections.Tagged
 
 
 
-open LinqModule
+open LinqTypes
 open Microsoft.FSharp.Collections.Tagged
 
 

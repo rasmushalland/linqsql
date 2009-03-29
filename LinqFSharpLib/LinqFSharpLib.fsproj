@@ -49,6 +49,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Types.fs" />
     <Compile Include="LinqTranslation.fs" />
     <Compile Include="SqlGeneration.fs" />
     <Compile Include="LinqClasses.fs" />
