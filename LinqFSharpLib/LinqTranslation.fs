@@ -288,6 +288,91 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
             { owner with FromClause = newTableExpression :: owner.FromClause; VirtualTableSqlValue = toBeMerged.VirtualTableSqlValue }
 
     and processExpressionImpl (expr : Expression, tables : Map<ParameterExpression, SqlValue>, tableAliasHint : string option, colPropMap : Map<string, SqlValue>, settings : SqlSettings) : SqlValue =
+        let handleSelectMany(input, collSelector : LambdaExpression, resultSelector : LambdaExpression option) =
+            let newhint = Some(collSelector.Parameters.[0].Name)
+            let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap, settings)
+
+            let jointype, collExpr =
+                match collSelector.Body with
+                | LinqPatterns.DefaultIfEmpty(collExpr) -> JoinType.LeftOuter, collExpr
+                | collExpr -> JoinType.Inner, collExpr
+            let collSelectClause = 
+                let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
+                let alias =
+                    match resultSelector with
+                    | Some(lambda) -> Some(lambda.Parameters.[1].Name)
+                    | None -> None
+                processExpressionImplAsSelect(collExpr, tablesForJoin, alias, colPropMap, settings)
+
+            let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None, settings)
+
+            let tAfterSelect = match resultSelector with 
+                                | Some(sel) -> 
+                                    let joinedToTable =
+                                        let lastFromClause = List.hd collSelectClause.FromClause
+                                        match lastFromClause.Content with
+                                        | LogicalTableContent(logicalTable) -> logicalTable
+                                        | SelectClauseContent(_) -> failwith "Can't have joined to a select clause."
+                                    let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
+                                    processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap, settings)
+                                | None -> inputselectclause.VirtualTableSqlValue
+
+            SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
+
+        let handleCallIQueryableReturnType(callExpr : MethodCallExpression) =
+            let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap, settings))
+            let argPairs = Seq.zip (callExpr.Method.GetParameters()) argSqlValues
+            let queryable =
+                let makeArgument (param : ParameterInfo, sqlValue) : obj =
+                    match sqlValue with
+                    | ConstSqlValue(v, _) -> v
+                    | _ when param.ParameterType.IsValueType -> Activator.CreateInstance(param.ParameterType)
+                    | _ -> box None
+                let argsArray = argPairs |> Seq.map makeArgument |> Seq.to_array
+                callExpr.Method.Invoke(None, argsArray) :?> IQueryable
+            let newColPropMap =
+                let makeColPairs (param : ParameterInfo, sqlValue) : (string * SqlValue) option = 
+                    match sqlValue with
+                    | ConstSqlValue(_, _) -> None
+                    | ColumnAccessSqlValue(_, _) -> Some(param.Name, sqlValue)
+                    | _ -> failwith ("Can only parameterize views with constants and column properties.")
+                let emptyColPropMap = Map<string, SqlValue>.Empty(StringComparer.Ordinal)
+                Seq.choose makeColPairs argPairs 
+                |> Seq.fold (fun (colPropMap2 : Map<string, SqlValue>) (propname, sqlValue) -> colPropMap2.Add(propname, sqlValue)) emptyColPropMap
+
+            let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap, settings)
+
+            SelectClauseSqlValue select
+
+        let handleJoin(leftInput, rightInput, leftSelector : LambdaExpression, rightSelector : LambdaExpression, resultSelector : LambdaExpression) =
+            let leftSelectClause = 
+                let leftHint = Some(leftSelector.Parameters.[0].Name)
+                processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap, settings)
+
+            let rightSelectClause = 
+                let rightHint = Some(rightSelector.Parameters.[0].Name)
+                processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap, settings)
+
+            let condition =
+                let getOrderedJoinValues vt (keySelector : LambdaExpression) =
+                    let expr = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], vt), Some(keySelector.Parameters.[0].Name), colPropMap, settings)
+                    match expr with
+                    | VirtualTableSqlValue(colmap) -> colmap |> Seq.map (fun kvp -> kvp.Value) |> Seq.to_list
+                    | _ -> [expr]
+                let leftCols = getOrderedJoinValues leftSelectClause.VirtualTableSqlValue leftSelector
+                let rightCols = getOrderedJoinValues rightSelectClause.VirtualTableSqlValue rightSelector
+                List.map2 (fun leftSqlValue rightSqlValue -> BinarySqlValue(BinaryOperator.Equal, leftSqlValue, rightSqlValue)) leftCols rightCols
+                |> List.reduce_left (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
+
+            let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition), settings)
+
+            // Is this correct?: To keep only the vtable from the result selector? Should we keep more?
+            let resultVirtualTable = 
+                let resultTableMap = tables.Add(resultSelector.Parameters.[0], leftSelectClause.VirtualTableSqlValue).Add(resultSelector.Parameters.[1], rightSelectClause.VirtualTableSqlValue)
+                processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap, settings)
+
+            SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
+
         match expr with
         | TableAccess tableAliasHint t -> 
             match t with
@@ -384,73 +469,10 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 let inputselectclause = processExpressionImplAsSelect(input, tables, inputAliasHint, colPropMap, settings)
                 let keyScalar = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], inputselectclause.VirtualTableSqlValue), inputAliasHint, colPropMap, settings)
                 SelectClauseSqlValue({ inputselectclause with OrderBy = (keyScalar, direction) :: inputselectclause.OrderBy })
-            | LinqPatterns.SelectMany(input, collSelector, resultSelector) ->
-                let newhint = Some(collSelector.Parameters.[0].Name)
-                let inputselectclause = processExpressionImplAsSelect(input, tables, newhint, colPropMap, settings)
-
-                let jointype, collExpr =
-                    match collSelector.Body with
-                    | LinqPatterns.DefaultIfEmpty(collExpr) -> JoinType.LeftOuter, collExpr
-                    | collExpr -> JoinType.Inner, collExpr
-                let collSelectClause = 
-                    let tablesForJoin = tables.Add(collSelector.Parameters.[0], inputselectclause.VirtualTableSqlValue)
-                    let alias =
-                        match resultSelector with
-                        | Some(lambda) -> Some(lambda.Parameters.[1].Name)
-                        | None -> None
-                    processExpressionImplAsSelect(collExpr, tablesForJoin, alias, colPropMap, settings)
-
-                let mergedSelect = mergeSelect(inputselectclause, collSelectClause, Some(jointype), None, settings)
-
-                let tAfterSelect = match resultSelector with 
-                                    | Some(sel) -> 
-                                        let joinedToTable =
-                                            let lastFromClause = List.hd collSelectClause.FromClause
-                                            match lastFromClause.Content with
-                                            | LogicalTableContent(logicalTable) -> logicalTable
-                                            | SelectClauseContent(_) -> failwith "Can't have joined to a select clause."
-                                        let tablesForResultSelector = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue).Add(sel.Parameters.[1], LogicalTableSqlValue joinedToTable)
-                                        processExpressionImpl(sel.Body, tablesForResultSelector, None, colPropMap, settings)
-                                    | None -> inputselectclause.VirtualTableSqlValue
-
-//                let tAfterSelect = match resultSelector with 
-//                                    | Some(sel) -> 
-//                                        let resultTableMap = tables.Add(sel.Parameters.[0], inputselectclause.VirtualTableSqlValue)
-//                                        let resultTableMap = tables.Add(sel.Parameters.[1], collSelectClause.VirtualTableSqlValue)
-//                                        processExpressionImpl(sel.Body, resultTableMap, None, colPropMap, settings)
-//                                    | None -> inputselectclause.VirtualTableSqlValue
-
-                SelectClauseSqlValue({ mergedSelect with VirtualTableSqlValue = tAfterSelect })
-
+            | LinqPatterns.SelectMany(input, collSelector, resultSelector) -> 
+                handleSelectMany(input, collSelector, resultSelector)
             | LinqPatterns.Join(leftInput, rightInput, leftSelector, rightSelector, resultSelector) ->
-                let leftSelectClause = 
-                    let leftHint = Some(leftSelector.Parameters.[0].Name)
-                    processExpressionImplAsSelect(leftInput, tables, leftHint, colPropMap, settings)
-
-                let rightSelectClause = 
-                    let rightHint = Some(rightSelector.Parameters.[0].Name)
-                    processExpressionImplAsSelect(rightInput, tables, rightHint, colPropMap, settings)
-
-                let condition =
-                    let getOrderedJoinValues vt (keySelector : LambdaExpression) =
-                        let expr = processExpressionImpl(keySelector.Body, tables.Add(keySelector.Parameters.[0], vt), Some(keySelector.Parameters.[0].Name), colPropMap, settings)
-                        match expr with
-                        | VirtualTableSqlValue(colmap) -> colmap |> Seq.map (fun kvp -> kvp.Value) |> Seq.to_list
-                        | _ -> [expr]
-                    let leftCols = getOrderedJoinValues leftSelectClause.VirtualTableSqlValue leftSelector
-                    let rightCols = getOrderedJoinValues rightSelectClause.VirtualTableSqlValue rightSelector
-                    List.map2 (fun leftSqlValue rightSqlValue -> BinarySqlValue(BinaryOperator.Equal, leftSqlValue, rightSqlValue)) leftCols rightCols
-                    |> List.reduce_left (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
-
-                let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition), settings)
-
-                // Is this correct?: To keep only the vtable from the result selector? Should we keep more?
-                let resultVirtualTable = 
-                    let resultTableMap = tables.Add(resultSelector.Parameters.[0], leftSelectClause.VirtualTableSqlValue).Add(resultSelector.Parameters.[1], rightSelectClause.VirtualTableSqlValue)
-                    processExpressionImpl(resultSelector.Body, resultTableMap, None, colPropMap, settings)
-
-                SelectClauseSqlValue({ combinedSelectClause with VirtualTableSqlValue = resultVirtualTable })
-
+                handleJoin(leftInput, rightInput, leftSelector, rightSelector, resultSelector)
             | LinqPatterns.Union(isUnionAll, leftInput, rightInput) ->
                 let l = processExpressionImplAsSelect(leftInput, tables, None, colPropMap, settings)
                 let r = processExpressionImplAsSelect(rightInput, tables, None, colPropMap, settings)
@@ -458,29 +480,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 SelectClauseSqlValue({ l with Next = Some(construct, r) })
 
             | LinqPatterns.Call(_, callExpr) when typeof<IQueryable>.IsAssignableFrom(callExpr.Method.ReturnType) ->
-                let argSqlValues = callExpr.Arguments |> Seq.map (fun arg -> processExpressionImpl(arg, tables, tableAliasHint, colPropMap, settings))
-                let argPairs = Seq.zip (callExpr.Method.GetParameters()) argSqlValues
-                let queryable =
-                    let makeArgument (param : ParameterInfo, sqlValue) : obj =
-                        match sqlValue with
-                        | ConstSqlValue(v, _) -> v
-                        | _ when param.ParameterType.IsValueType -> Activator.CreateInstance(param.ParameterType)
-                        | _ -> box None
-                    let argsArray = argPairs |> Seq.map makeArgument |> Seq.to_array
-                    callExpr.Method.Invoke(None, argsArray) :?> IQueryable
-                let newColPropMap =
-                    let makeColPairs (param : ParameterInfo, sqlValue) : (string * SqlValue) option = 
-                        match sqlValue with
-                        | ConstSqlValue(_, _) -> None
-                        | ColumnAccessSqlValue(_, _) -> Some(param.Name, sqlValue)
-                        | _ -> failwith ("Can only parameterize views with constants and column properties.")
-                    let emptyColPropMap = Map<string, SqlValue>.Empty(StringComparer.Ordinal)
-                    Seq.choose makeColPairs argPairs 
-                    |> Seq.fold (fun (colPropMap2 : Map<string, SqlValue>) (propname, sqlValue) -> colPropMap2.Add(propname, sqlValue)) emptyColPropMap
-
-                let select = processExpressionImplAsSelect(queryable.Expression, tables, None, newColPropMap, settings)
-
-                SelectClauseSqlValue select
+                handleCallIQueryableReturnType(callExpr)
             | LinqPatterns.Call(methodName, callExpr) ->
                 let methodName = match settings.TranslateCall(callExpr) with | Some(n) -> n | None -> methodName
                 let allSqlValues = 
