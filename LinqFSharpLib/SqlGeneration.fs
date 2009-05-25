@@ -1,5 +1,4 @@
-﻿#light
-
+﻿
 module SqlGeneration
 
 open System
@@ -45,7 +44,7 @@ let internal GetColumnSql(columnPropertyInfo : PropertyInfo, tableAlias : string
 let rec internal GetAlias(tableNames : Map<TableExpressionToken, string>, tableToken : TableExpressionToken, aliasHint : string) : string * Map<TableExpressionToken, string> =
     let rec tryAlias i =
         let aliasAttempt = if i = 1 then aliasHint else aliasHint ^ "_" ^ (i.ToString())
-        match tableNames |> Seq.tryfind (fun kvp -> kvp.Value = aliasAttempt)  with
+        match tableNames |> Seq.tryFind (fun kvp -> kvp.Value = aliasAttempt)  with
         | Some(_) -> if i < 20  then tryAlias (i+1) else failwith "wtf: > 20 table instances?"
         | None -> aliasAttempt
     let alias = tryAlias 1
@@ -192,7 +191,7 @@ let internal DeleteToString(select : SelectClause, tablenames : Map<TableExpress
 let internal UpdateToString(select : SelectClause, tablenames : Map<TableExpressionToken, string>, settings : SqlSettings) : string =
     let tableSql, tablenames =
         // We need to get the table declared with alias up front ("UPDATE Table myalias ..."), and we can't use the new row for this.
-        if List.is_empty select.FromClause then failwith "Empty FROM clause for update?"
+        if List.isEmpty select.FromClause then failwith "Empty FROM clause for update?"
         else
             let tableExpr = List.nth select.FromClause ((List.length select.FromClause) - 1)
             match tableExpr.Content with

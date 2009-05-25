@@ -16,8 +16,8 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestSelectStar()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					select s1;
+					from o in DBX.Orders
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -25,9 +25,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestSelectStarWhere()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				where s1.SomeInteger > 1980
-				select s1;
+				from o in DBX.Orders
+				where o.ShipVia > 1980
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -35,10 +35,10 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestConvertWithImplicitCast()
 		{
 			var q =
-				from s in DBX.PurchaseOrder
-				let id = 123
-				where s.ID == id
-				select s;
+				from o in DBX.Orders
+				let id = 10248
+				where o.OrderID == id
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -46,9 +46,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestSelectStarWhere2()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				where s1.SomeInteger > 1980 && s1.SomeInteger < 1990
-				select s1;
+				from o in DBX.Orders
+				where o.ShipVia > 1980 && o.ShipVia < 1990
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -56,9 +56,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithInnerJoin()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					from he in DBX.Product.Where(he => he.FirstManufacturedYear > s1.SecondaryID)
-					select s1;
+					from o in DBX.Orders
+					from p in DBX.Product.Where(p => p.ProductName != o.ShipName)
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -66,10 +66,10 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithInnerJoinDouble()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					from he1 in DBX.Product.Where(he1 => he1.FirstManufacturedYear > s1.SecondaryID)
-					from he2 in DBX.Product.Where(he2 => he2.ID > he1.ID)
-					select s1;
+					from o in DBX.Orders
+					from p1 in DBX.Product.Where(p => p.ProductName != o.ShipName)
+					from p in DBX.Product.Where(he2 => he2.ID > p1.ID)
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -77,9 +77,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithOrderBy()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					orderby s1.Title
-					select s1;
+					from o in DBX.Orders
+					orderby o.Title
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -87,9 +87,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithOrderByDescending()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					orderby s1.Title descending
-					select s1;
+					from o in DBX.Orders
+					orderby o.Title descending
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -97,9 +97,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithOrderByThenBy()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					orderby s1.Title, s1.ID
-					select s1;
+					from o in DBX.Orders
+					orderby o.Title, o.OrderID
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -107,9 +107,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithLeftOuterJoin()
 		{
 			IQueryable q =
-					from s1 in DBX.PurchaseOrder
-					from he in DBX.Product.Where(he => he.FirstManufacturedYear > s1.SecondaryID).DefaultIfEmpty()
-					select s1;
+					from o in DBX.Orders
+					from p in DBX.Product.Where(p => p.ProductName != o.ShipName).DefaultIfEmpty()
+					select o;
 			ProcessQuery(q);
 		}
 
@@ -117,10 +117,10 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithLeftOuterJoinAndWhere()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				from he in DBX.Product.Where(he => he.FirstManufacturedYear > s1.SecondaryID).DefaultIfEmpty()
-				where he.ID == 0 || he.ID > 1000
-				select s1;
+				from o in DBX.Orders
+				from p in DBX.Product.Where(p => p.ProductName != o.ShipName).DefaultIfEmpty()
+				where p.ID == 0 || p.ID > 1000
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -128,9 +128,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithJoinSyntax_OneColumn()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				join she in DBX.OrderDetail on s1.ID equals she.OrderID
-				select s1;
+				from o in DBX.Orders
+				join od in DBX.OrderDetails on o.OrderID equals od.OrderID
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -138,9 +138,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithJoinSyntax_AnonymousType()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				join she in DBX.OrderDetail on new { StudentID = s1.ID } equals new { StudentID = she.OrderID }
-				select s1;
+				from o in DBX.Orders
+				join od in DBX.OrderDetails on new { o.OrderID } equals new { od.OrderID }
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -148,9 +148,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithJoinSyntax_AnonymousType2()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				join she in DBX.OrderDetail on new { StudentID = s1.ID, Name = s1.Title } equals new { StudentID = she.OrderID, Name = "charles" }
-				select s1;
+				from o in DBX.Orders
+				join od in DBX.OrderDetails on new { o.OrderID, Name = o.Title } equals new { od.OrderID, Name = "charles" }
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -158,9 +158,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithViewJoinSelectMany()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				from she in DBX.GetStudentHoldElementer(s1.ID)
-				select she;
+				from o in DBX.Orders
+				from od in DBX.GetOrderDetails(o.OrderID)
+				select od;
 			ProcessQuery(q);
 		}
 
@@ -168,9 +168,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithViewJoinSelectMany_ComplexView()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				from he in DBX.GetHoldElementerForStudent(s1.ID)
-				select he;
+				from o in DBX.Orders
+				from p in DBX.GetProductsFromOrder(o.OrderID)
+				select p;
 			ProcessQuery(q);
 		}
 
@@ -178,8 +178,8 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithViewJoin()
 		{
 			IQueryable q =
-				from orderDetail in DBX.OrderDetail
-				join p in DBX.GetProductsActive(DateTime.Now) on orderDetail.ProductID equals p.ID
+				from orderDetail in DBX.OrderDetails
+				join p in DBX.GetProductsWithStock(10) on orderDetail.ProductID equals p.ID
 				select p;
 			ProcessQuery(q);
 		}
@@ -188,9 +188,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithViewFromJoin()
 		{
 			IQueryable q =
-				from orderDetail in DBX.OrderDetail
-				from she in DBX.GetProductsActive(DateTime.Now).Where(product => orderDetail.ProductID == product.ID)
-				select she;
+				from orderDetail in DBX.OrderDetails
+				from p in DBX.GetProductsWithStock(20).Where(product => orderDetail.ProductID == product.ID)
+				select p;
 			ProcessQuery(q);
 		}
 
@@ -198,8 +198,8 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithTablePropertyPredicate()
 		{
 			IQueryable q =
-				from s1 in DBX.OrdersWithLargeID
-				select s1;
+				from o in DBX.OrdersWithLargeEmployeeID
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -207,9 +207,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithTablePropertyPredicateOnJoinedTable()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				join she in DBX.OrderDetailsWithLargeOrderID on s1.ID equals she.OrderID
-				select s1;
+				from o in DBX.Orders
+				join od in DBX.OrderDetailsWithLargeEmployeeID on o.OrderID equals od.OrderID
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -217,9 +217,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithTablePropertyPredicateOnJoinedTable_SelectMany()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				from she in DBX.OrderDetailsWithLargeOrderID.Where(she => s1.ID == she.OrderID)
-				select s1;
+				from o in DBX.Orders
+				from od in DBX.OrderDetailsWithLargeEmployeeID.Where(she => o.OrderID == she.OrderID)
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -227,24 +227,24 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestQueryWithLet()
 		{
 			IQueryable q =
-				from s1 in DBX.PurchaseOrder
-				let xx = s1.ID + 10
-				where s1.SomeInteger > 50 && xx > 100
-				select s1;
+				from o in DBX.Orders
+				let xx = o.OrderID + 10
+				where o.ShipVia > 50 && xx > 100
+				select o;
 			ProcessQuery(q);
 		}
 
 		[Test]
 		public void TestQuerySimpleWhere()
 		{
-			ProcessQuery((new PurchaseOrder[0]).AsQueryable().Where(s => s.ID == 123));
+			ProcessQuery((new Orders[0]).AsQueryable().Where(s => s.OrderID == 123));
 		}
 
 		[Test]
 		public void TestFunction_ToUpper()
 		{
 			var q =
-				from s in DBX.PurchaseOrder
+				from s in DBX.Orders
 				where s.Title.ToUpper() == "Hans"
 				select s;
 			ProcessQuery(q);
@@ -254,9 +254,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestCrossJoin()
 		{
 			var q =
-				from s1 in DBX.PurchaseOrder
-				from s2 in DBX.PurchaseOrder
-				select s2;
+				from o1 in DBX.Orders
+				from o2 in DBX.Orders
+				select o2;
 			ProcessQuery(q);
 		}
 
@@ -264,9 +264,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestCrossJoin_TurnedToInnerJoin()
 		{
 			var q =
-				from s1 in DBX.PurchaseOrder
-				from s2 in DBX.OrdersWithLargeID
-				select s2;
+				from o1 in DBX.Orders
+				from o2 in DBX.OrdersWithLargeEmployeeID
+				select o2;
 			ProcessQuery(q);
 		}
 
@@ -274,13 +274,13 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestUnion()
 		{
 			var q =
-				(from s1 in DBX.PurchaseOrder
-				where s1.ID < 100
-				select s1)
+				(from o in DBX.Orders
+				where o.OrderID < 100
+				select o)
 				.Union(
-				(from s1 in DBX.PurchaseOrder
-				 where s1.ID > 101
-				 select s1)
+				(from o in DBX.Orders
+				 where o.OrderID > 101
+				 select o)
 				);
 			ProcessQuery(q);
 		}
@@ -289,17 +289,17 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestUnion_Alias()
 		{
 			var q =
-				from stud in 
-				(from s1 in DBX.PurchaseOrder
-				where s1.ID < 100
-				select s1)
+				from o in 
+				(from o in DBX.Orders
+				where o.OrderID < 100
+				select o)
 				.Union(
-				(from s2 in DBX.PurchaseOrder
-				 where s2.ID > 101
-				 select s2)
+				(from o2 in DBX.Orders
+				 where o2.OrderID > 101
+				 select o2)
 				)
-				where stud.ID == 100
-				select stud;
+				where o.OrderID == 100
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -307,18 +307,18 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestUnion_Multiple()
 		{
 			var q =
-				(from s1 in DBX.PurchaseOrder
-				where s1.ID < 100
-				select s1)
+				(from o in DBX.Orders
+				where o.OrderID < 100
+				select o)
 				.Union(
-				(from s1 in DBX.PurchaseOrder
-				 where s1.ID > 100
-				 select s1)
+				(from o in DBX.Orders
+				 where o.OrderID > 100
+				 select o)
 				)
 				.Union(
-				(from s1 in DBX.PurchaseOrder
-				 where s1.ID == 100
-				 select s1)
+				(from o in DBX.Orders
+				 where o.OrderID == 100
+				 select o)
 				);
 			ProcessQuery(q);
 		}
@@ -327,13 +327,13 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestUnionAll()
 		{
 			var q =
-				(from s1 in DBX.PurchaseOrder
-				where s1.ID == 100
-				select s1)
+				(from o in DBX.Orders
+				where o.OrderID == 100
+				select o)
 				.Concat(
-				(from s1 in DBX.PurchaseOrder
-				 where s1.ID == 101
-				 select s1)
+				(from o in DBX.Orders
+				 where o.OrderID == 101
+				 select o)
 				);
 			ProcessQuery(q);
 		}
@@ -344,30 +344,30 @@ namespace LinqTestConsoleApp.SqlOM
 			var ids = new[] {100, 200, 300};
 			var q =
 				from id in ids.AsQueryable()
-				join s2 in DBX.PurchaseOrder on id equals s2.ID
-				select s2;
+				join o in DBX.Orders on id equals o.OrderID
+				select o;
 			ProcessQuery(q);
 		}
 
 		[Test]
 		public void TestEnumerableTable2()
 		{
-			var ids = new[] {100, 200, 300};
+			var ids = new List<long> { 100, 200, 300 };
 			var q =
-				from s1 in DBX.PurchaseOrder
-				join id in ids on s1.ID equals id
-				select s1;
+				from o in DBX.Orders
+				join id in ids on o.OrderID equals id
+				select o;
 			ProcessQuery(q);
 		}
 
 		[Test(Description = "Should generate \"WHERE ... IN (...)\".")]
 		public void TestEnumerableTable3()
 		{
-			var ids = new long[] { 100, 200, 300 };
+			var ids = new List<long> { 100, 200, 300 };
 			var q =
-				from s1 in DBX.PurchaseOrder
-				where ids.Contains(s1.ID)
-				select s1;
+				from o in DBX.Orders
+				where ids.Contains(o.OrderID)
+				select o;
 			ProcessQuery(q);
 		}
 
@@ -375,9 +375,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestUpdate()
 		{
 			var q =
-				from s in DBX.PurchaseOrder
-				where s.ID == 123
-				select new PurchaseOrder { Title = "New student name" };
+				from o in DBX.Orders
+				where o.OrderID == 123
+				select new Orders { ShipName = "New shipname" };
 			ProcessUpdate(q);
 		}
 
@@ -385,9 +385,9 @@ namespace LinqTestConsoleApp.SqlOM
 		public void TestUpdateWithColumnValueUse()
 		{
 			var q =
-				from s in DBX.PurchaseOrder
-				where s.ID == 123
-				select new PurchaseOrder { Title = s.Title + s.ID };
+				from o in DBX.Orders
+				where o.OrderID == 123
+				select new Orders { ShipName = o.Title + o.OrderID };
 			ProcessUpdate(q);
 		}
 
@@ -410,88 +410,80 @@ namespace LinqTestConsoleApp.SqlOM
 	}
 
 
-	[Table(Name = "PurchaseOrder")]
-	class PurchaseOrder
+	[Table(Name = "orders")]
+	class Orders
 	{
-		[Column(Name = "id")]
-		public long ID { get; private set; }
-		public string Title { get; set; }
-		[Column(Name = "some_integer")]
-		public int SomeInteger { get; set; }
+		public int OrderID { get; private set; }
+		public int EmployeeID { get; private set; }
 
-		[Column(Expression = "title || some_integer")]
-		public int ComputedTitle { get; set; }
+		[Column(Expression = "'Title: ' + cast({0}.requireddate as varchar(50))")]
+		public string Title { get; set; }
+		public int ShipVia { get; set; }
+		public string ShipName { get; set; }
 
 		public int? SecondaryID { get; internal set; }
 	}
 
-	class Product
+	class Products
 	{
 		public long ID { get; private set; }
-
-		public int FirstManufacturedYear { get; private set; }
-
-		public DateTime AvailabilityFrom { get; private set; }
-		public DateTime AvailabilityTo { get; private set; }
+		public string ProductName { get; private set; }
+		public int UnitsOnOrder { get; private set; }
+		public int UnitsInStock { get; private set; }
 	}
 
-	[Table(Name = "OrderDetail")]
+	[Table(Name = "Order Details")]
 	class OrderDetail
 	{
-		[Column(Name = "Order_ID")]
-		public long OrderID { get; private set; }
-		[Column(Name = "Product_ID")]
-		public long ProductID { get; private set; }
-
-		public DateTime StartDate { get; set; }
-		public DateTime EndDate { get; set; }
+		public int OrderID { get; private set; }
+		public int ProductID { get; private set; }
 	}
 
 	static class DBX
 	{
-		public static IQueryable<OrderDetail> OrderDetail
+		public static IQueryable<OrderDetail> OrderDetails
 		{
 			get { return (new OrderDetail[0]).AsQueryable(); }
 		}
-		public static IQueryable<PurchaseOrder> PurchaseOrder
+		public static IQueryable<Orders> Orders
 		{
-			get { return (new PurchaseOrder[0]).AsQueryable(); }
+			get { return (new Orders[0]).AsQueryable(); }
 		}
 
-		public static IQueryable<PurchaseOrder> OrdersWithLargeID
+		public static IQueryable<Orders> OrdersWithLargeEmployeeID
 		{
-			get { return (new PurchaseOrder[0]).AsQueryable().Where(order => order.ID > 1000); }
+			get { return (new Orders[0]).AsQueryable().Where(order => order.EmployeeID > 1000); }
 		}
-		public static IQueryable<OrderDetail> OrderDetailsWithLargeOrderID
+		public static IQueryable<OrderDetail> OrderDetailsWithLargeEmployeeID
 		{
-			get { return from orderDetail in OrderDetail where orderDetail.OrderID > 1001 select orderDetail; }
-		}
-
-		public static IQueryable<Product> Product
-		{
-			get { return (new Product[0]).AsQueryable(); }
+			get { return from orderDetail in OrderDetails where orderDetail.OrderID > 1001 select orderDetail; }
 		}
 
-		public static IQueryable<OrderDetail> GetStudentHoldElementer(long studentID)
+		public static IQueryable<Products> Product
+		{
+			get { return (new Products[0]).AsQueryable(); }
+		}
+
+		public static IQueryable<OrderDetail> GetOrderDetails(long studentID)
 		{
 			return
-				from orderDetail in OrderDetail
+				from orderDetail in OrderDetails
 				where orderDetail.OrderID == studentID
 				select orderDetail;
 		}
 
-		public static IQueryable<Product> GetProductsActive(DateTime asof)
+		public static IQueryable<Products> GetProductsWithStock(int minInStock)
 		{
 			return
 				from p in Product
-				where p.AvailabilityFrom <= asof && p.AvailabilityTo  > asof
+				where p.UnitsInStock >= minInStock
 				select p;
 		}
 
-		public static IQueryable<Product> GetHoldElementerForStudent(long studentID)
+		public static IQueryable<Products> GetProductsFromOrder(long studentID)
 		{
 			return
-				from orderDetail in OrderDetail
+				from orderDetail in OrderDetails
 				where orderDetail.OrderID == studentID
 				join p in Product on orderDetail.ProductID equals p.ID
 				select p;

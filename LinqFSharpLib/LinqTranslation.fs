@@ -1,5 +1,4 @@
-﻿#light
-
+﻿
 module LinqModule
 
 open LinqTypes
@@ -43,11 +42,11 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
         let selValue = processExpressionImpl(expr, tables, tableAliasHint, colPropMap, settings)
         match selValue with
         | SelectClauseSqlValue(sel) -> sel
-        | _ -> failwith ("not sel, but " ^ (any_to_string selValue)  ^ "??")
+        | _ -> failwith (sprintf "not sel, but %A??" selValue)
 
     and mergeSelect (owner : SelectClause, toBeMerged : SelectClause, joinTypeHint : JoinType option, joinCondition : SqlValue option, settings : SqlSettings) : SelectClause =
         match 1 with
-        | _ when List.is_empty toBeMerged.OrderBy = false -> failwith "Can't have ORDER BY on sub-select."
+        | _ when List.isEmpty toBeMerged.OrderBy = false -> failwith "Can't have ORDER BY on sub-select."
         | _ ->
             let condition =
                 match toBeMerged.WhereClause, joinCondition with
@@ -147,7 +146,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 let leftCols = getOrderedJoinValues leftSelectClause.VirtualTableSqlValue leftSelector
                 let rightCols = getOrderedJoinValues rightSelectClause.VirtualTableSqlValue rightSelector
                 List.map2 (fun leftSqlValue rightSqlValue -> BinarySqlValue(BinaryOperator.Equal, leftSqlValue, rightSqlValue)) leftCols rightCols
-                |> List.reduce_left (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
+                |> List.reduce (fun l r -> BinarySqlValue(BinaryOperator.AndAlso, l, r))
 
             let combinedSelectClause = mergeSelect(leftSelectClause, rightSelectClause, Some(JoinType.Inner), Some(condition), settings)
 
@@ -217,7 +216,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
                 (newExpr.Members |> Seq.map (fun memberinfo -> getpi (memberinfo :?> MethodInfo)) |> Seq.to_list)
             let pairs = List.zip propertyInfos (newExpr.Arguments |> Seq.to_list)
             let foldFunc (statemap : Map<PropertyInfo, SqlValue>) (m, v) = statemap.Add(m, processExpressionImpl(v, tables, tableAliasHint, colPropMap, settings))
-            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) pairs
+            let m2 = List.fold foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) pairs
             VirtualTableSqlValue(m2)
         | :? MemberInitExpression as mi ->
             // Throw away the NewExpression - since there is a MemberInitExpression, the constructur call can reasonably be ignored.
@@ -225,7 +224,7 @@ let internal ProcessExpression (expr : Expression, settings : SqlSettings) : Sel
             let memberAssBindings = mi.Bindings |> Seq.map (fun binding -> binding :?> MemberAssignment) |> Seq.to_list
             let foldFunc (statemap : Map<PropertyInfo, SqlValue>) (ma : MemberAssignment) = 
                 statemap.Add((ma.Member :?> PropertyInfo), processExpressionImpl(ma.Expression, tables, tableAliasHint, colPropMap, settings))
-            let m2 = List.fold_left foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) memberAssBindings
+            let m2 = List.fold foldFunc (Map<_,_>.Empty(PropertyInfoComparer)) memberAssBindings
             VirtualTableSqlValue(m2)
         | :? ConditionalExpression as ce ->
             let test = processExpressionImpl(ce.Test, tables, tableAliasHint, colPropMap, settings)

@@ -1,5 +1,4 @@
-﻿#light
-
+﻿
 namespace LinqTranslation
 
 open System
